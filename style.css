@@ -339,6 +339,49 @@ body.is-admin .agenda-list li:hover { background: #2a3750; }
 .tab-pane { display: none; }
 .tab-pane.is-active { display: block; }
 
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 22px 18px;
+  border: 2px dashed var(--line);
+  border-radius: var(--radius-m);
+  background: rgba(138, 180, 255, .04);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone:focus-visible, .dropzone.is-over { border-color: var(--accent); background: rgba(138, 180, 255, .1); outline: none; }
+.dropzone-main { display: flex; flex-direction: column; gap: 2px; }
+.dropzone-main strong { font-size: 16px; }
+.dropzone-main span { color: var(--muted); font-size: 13px; }
+.thumbs { list-style: none; display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 0; padding: 0; }
+.thumbs li { position: relative; width: 132px; }
+.thumbs img {
+  display: block;
+  width: 132px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line);
+  background: var(--ink);
+}
+.thumbs small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.thumbs .thumb-del {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-height: 0;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(15, 20, 30, .8);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .file-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 180px; overflow: auto; }
 .file-list li button {
   width: 100%;

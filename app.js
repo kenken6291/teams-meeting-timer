@@ -806,6 +806,87 @@
   let draft = { title: '', agenda: [] };
   const MAX_ROWS = 30;
 
+  /* ---------- 画像からの取り込み ----------
+   * 画像はブラウザで縮小（長辺 2000px・JPEG）してから送る。
+   * 文字が読める解像度を保ちつつ、GAS への送信量を抑えるため。 */
+  const MAX_IMAGES = 3;
+  const IMG_LONG_SIDE = 2000;
+  const IMG_QUALITY = 0.85;
+  let images = [];   // { name, dataUrl, base64, bytes }
+
+  function switchImportTab(name) {
+    $$('#importDlg .tab').forEach((t) => t.classList.toggle('is-active', t.dataset.tab === name));
+    $$('#importDlg .tab-pane').forEach((p) => p.classList.toggle('is-active', p.dataset.pane === name));
+  }
+
+  function loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('この画像は読み込めません（HEIC の場合は JPEG か PNG で保存し直してください）')); };
+      img.src = url;
+    });
+  }
+
+  async function shrinkImage(file) {
+    const img = await loadImage(file);
+    const scale = Math.min(1, IMG_LONG_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';            // 透過 PNG のスクリーンショット対策（背景を白に）
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL('image/jpeg', IMG_QUALITY);
+    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    return { name: file.name || '貼り付けた画像', dataUrl, base64, bytes: Math.round(base64.length * 0.75), w, h };
+  }
+
+  async function addImageFiles(files) {
+    const list = Array.from(files || []).filter((f) => f && /^image\//.test(f.type));
+    if (!list.length) { toast('画像ファイルが見つかりませんでした', true); return; }
+    for (const f of list) {
+      if (images.length >= MAX_IMAGES) { toast(`画像は ${MAX_IMAGES} 枚までです`, true); break; }
+      try {
+        images.push(await shrinkImage(f));
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }
+    renderThumbs();
+  }
+
+  function renderThumbs() {
+    $('#imgThumbs').innerHTML = images.map((im, i) => `
+      <li>
+        <img src="${im.dataUrl}" alt="アジェンダ画像 ${i + 1}">
+        <button type="button" class="thumb-del" data-del="${i}" aria-label="画像 ${i + 1} を外す">外す</button>
+        <small>${i + 1}枚目　${im.w}×${im.h}</small>
+      </li>`).join('');
+    const total = images.reduce((a, im) => a + im.bytes, 0);
+    setText('#imgInfo', images.length ? `${images.length} 枚（約 ${Math.max(1, Math.round(total / 1024))} KB）` : '');
+    $('#btnParseImage').disabled = images.length === 0;
+  }
+
+  /** 画像を完全に破棄する（保存はどこにもしない。解析後・失敗時・画面を閉じたときに呼ぶ） */
+  function clearImages() {
+    images.forEach((im) => { im.dataUrl = ''; im.base64 = ''; });
+    images = [];
+    $$('#imgThumbs img').forEach((img) => { img.removeAttribute('src'); });
+    const input = $('#imgFile');
+    if (input) input.value = '';
+    renderThumbs();
+  }
+
+  function clipboardImages(e) {
+    const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+    return items.filter((it) => it.kind === 'file' && /^image\//.test(it.type)).map((it) => it.getAsFile()).filter(Boolean);
+  }
+
   function openImport(useCurrent) {
     const s = st.state;
     if (useCurrent && s) {
@@ -866,9 +947,14 @@
       renderDraft();
       toast(`${r.agenda.length} 件の議題を読み取りました`);
     } catch (e) {
-      toast(e.message, true);
+      toast(e.message + (action === 'parseImage' ? '（画像は消去しました。もう一度貼り付けてください）' : ''), true);
     } finally {
       setImportLoading(false);
+      // 送信に使った画像データは成否にかかわらず消去する
+      if (action === 'parseImage') {
+        if (payload && Array.isArray(payload.images)) payload.images.forEach((im) => { im.data = ''; });
+        clearImages();
+      }
     }
   }
 
@@ -877,10 +963,44 @@
     $('#btnEditAgenda').addEventListener('click', () => openImport(true));
 
     $$('#importDlg .tab').forEach((tab) => {
-      tab.addEventListener('click', () => {
-        $$('#importDlg .tab').forEach((t) => t.classList.toggle('is-active', t === tab));
-        $$('#importDlg .tab-pane').forEach((p) => p.classList.toggle('is-active', p.dataset.pane === tab.dataset.tab));
-      });
+      tab.addEventListener('click', () => switchImportTab(tab.dataset.tab));
+    });
+
+    // ---- 画像：選択・ドロップ・貼り付け ----
+    const drop = $('#imgDrop');
+    $('#btnPickImage').addEventListener('click', (e) => { e.stopPropagation(); $('#imgFile').click(); });
+    drop.addEventListener('click', () => $('#imgFile').click());
+    drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#imgFile').click(); } });
+    $('#imgFile').addEventListener('change', (e) => { addImageFiles(e.target.files); e.target.value = ''; });
+    ['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('is-over'); }));
+    ['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('is-over'); }));
+    drop.addEventListener('drop', (e) => addImageFiles(e.dataTransfer && e.dataTransfer.files));
+    $('#imgThumbs').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-del]');
+      if (!b) return;
+      images.splice(Number(b.dataset.del), 1);
+      renderThumbs();
+    });
+    // 取り込み画面を閉じたら、解析前の画像も消去
+    $('#importDlg').addEventListener('close', clearImages);
+
+    $('#btnParseImage').addEventListener('click', () => {
+      if (!images.length) return;
+      runParse('parseImage', { images: images.map((im) => ({ mimeType: 'image/jpeg', data: im.base64 })) });
+    });
+
+    // どこで Ctrl+V しても画像なら取り込む（操作画面で進行役のときだけ）
+    document.addEventListener('paste', (e) => {
+      if (st.role !== 'admin' || MODE !== 'control' || document.body.classList.contains('auth-open')) return;
+      const files = clipboardImages(e);
+      if (!files.length) return;
+      const dlg = $('#importDlg');
+      const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d !== dlg);
+      if (otherDialog) return;
+      e.preventDefault();
+      if (!dlg.open) openImport(false);
+      switchImportTab('image');
+      addImageFiles(files);
     });
 
     $('#btnParseDrive').addEventListener('click', () => {

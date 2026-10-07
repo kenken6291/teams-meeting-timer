@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>会議タイマー</title>
   <!-- 更新時は ?v= の値を変えると、ブラウザの古いキャッシュを使わずに読み込まれる -->
-  <link rel="stylesheet" href="style.css?v=20261008c">
+  <link rel="stylesheet" href="style.css?v=20261008e">
 </head>
 <body data-level="idle" data-status="idle">
 
@@ -132,12 +132,30 @@
     </form>
 
     <div class="tabs" role="tablist">
-      <button type="button" class="tab is-active" data-tab="drive" role="tab">Google ドライブの資料</button>
+      <button type="button" class="tab is-active" data-tab="image" role="tab">画像を貼り付け</button>
+      <button type="button" class="tab" data-tab="drive" role="tab">Google ドライブの資料</button>
       <button type="button" class="tab" data-tab="text" role="tab">テキストを貼り付け</button>
       <button type="button" class="tab" data-tab="manual" role="tab">手で入力</button>
     </div>
 
-    <div class="tab-pane is-active" data-pane="drive">
+    <div class="tab-pane is-active" data-pane="image">
+      <p class="hint">アジェンダのスクリーンショットや写真を、ここに貼り付け（Ctrl+V）、ドラッグ＆ドロップ、または「画像を選ぶ」で追加してください。3枚まで。<br>画像は読み取りにだけ使い、<b>どこにも保存しません</b>。解析が終わったとき、またはこの画面を閉じたときに消去されます。</p>
+      <div class="dropzone" id="imgDrop" tabindex="0" role="button" aria-label="画像を貼り付けまたはドロップ">
+        <div class="dropzone-main">
+          <strong>ここに画像を貼り付け</strong>
+          <span>Ctrl+V ／ ドラッグ＆ドロップ</span>
+        </div>
+        <button class="btn small" type="button" id="btnPickImage">画像を選ぶ</button>
+        <input type="file" id="imgFile" accept="image/*" multiple hidden>
+      </div>
+      <ul class="thumbs" id="imgThumbs"></ul>
+      <div class="row between">
+        <span class="hint" id="imgInfo"></span>
+        <button class="btn primary" type="button" id="btnParseImage" disabled>Gemini で解析</button>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-pane="drive">
       <p class="hint">Google ドキュメント、スライド、スプレッドシート、PDF、テキストを読み込めます。共有 URL かファイル ID を入れてください。</p>
       <div class="row">
         <input id="driveRef" class="grow" type="text" placeholder="https://docs.google.com/presentation/d/…">
@@ -349,8 +367,8 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="config.js?v=20261008c"></script>
-  <script src="auth.js?v=20261008c"></script>
-  <script src="app.js?v=20261008c"></script>
+  <script src="config.js?v=20261008e"></script>
+  <script src="auth.js?v=20261008e"></script>
+  <script src="app.js?v=20261008e"></script>
 </body>
 </html>
