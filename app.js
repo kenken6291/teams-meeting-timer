@@ -1,11 +1,11 @@
 /* ============================================================
  *  Teams Meeting Timer — app.js
  *  モード
- *    ?mode=control  操作画面（既定）。管理者トークンで操作可、閲覧トークンなら表示のみ
+ *    ?mode=control  操作画面（既定）。合言葉で操作可、閲覧キーなら表示のみ
  *    ?mode=view     閲覧専用の大きな表示
  *    ?mode=overlay  OBS ブラウザソース用の透過オーバーレイ
  *  主な URL パラメータ
- *    room / token / poll(ms)
+ *    room / token（閲覧キー。操作画面では合言葉を画面から入力）/ poll(ms)
  *    api … config.js の apiUrl が未設定のときだけ有効
  *    overlay 用: bg(transparent|green|blue|magenta) pos(br|bl|tr|tl|bc|tc)
  *                size(s|m|l|xl) title(0|1) bar(0|1) hideIdle(0|1)
@@ -44,9 +44,20 @@
   function saveSaved(obj) {
     try { localStorage.setItem(LS_KEY, JSON.stringify(Object.assign(loadSaved(), obj))); } catch { /* 保存できない環境は無視 */ }
   }
+  const ROOM_RE = /^[A-Za-z0-9_-]{1,40}$/;
   function sanitizeRoom(r) {
     r = String(r || '').trim();
-    return /^[A-Za-z0-9_-]{1,40}$/.test(r) ? r : 'default';
+    return ROOM_RE.test(r) ? r : 'default';
+  }
+  /** 合言葉はルームごとにこのブラウザへ保存する */
+  function getStoredToken(room) {
+    const t = loadSaved().tokens || {};
+    return t[room] || '';
+  }
+  function storeToken(room, token) {
+    const tokens = Object.assign({}, loadSaved().tokens);
+    if (token) tokens[room] = token; else delete tokens[room];
+    saveSaved({ tokens, room });
   }
 
   const saved = loadSaved();
@@ -54,17 +65,25 @@
     // config.js に URL があればそれを最優先（URL パラメータや保存値では上書きしない）
     api: API_FIXED ? CONFIG_API_URL : String(qs.get('api') || saved.api || '').trim(),
     room: sanitizeRoom(qs.get('room') || saved.room || APP_CONFIG.defaultRoom || 'default'),
-    token: String(qs.get('token') || saved.token || '').trim(),
+    token: '',
     poll: clamp(Number(qs.get('poll')) || (MODE === 'overlay' ? 3000 : 2500), 1000, 30000),
   };
 
-  // 操作・閲覧画面では URL の値を保存し、トークンをアドレスバーから消す（画面共有での漏えい防止）
-  if (MODE !== 'overlay' && (qs.has('token') || qs.has('api') || qs.has('room'))) {
-    saveSaved({ api: API_FIXED ? '' : cfg.api, room: cfg.room, token: cfg.token });
-    qs.delete('token');
-    qs.delete('api');
-    const rest = qs.toString();
-    history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
+  // 合言葉／閲覧キーの決め方
+  //  - overlay / view : URL の token をそのまま使う（保存しない。進行役の合言葉を上書きしないため）
+  //  - control        : URL の token があれば保存してアドレスバーから消す（画面共有での漏えい防止）
+  if (MODE === 'control') {
+    if (qs.has('token')) {
+      storeToken(cfg.room, String(qs.get('token')).trim());
+      qs.delete('token');
+      qs.delete('api');
+      const rest = qs.toString();
+      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
+    }
+    cfg.token = getStoredToken(cfg.room);
+    if (!API_FIXED && qs.has('api')) saveSaved({ api: cfg.api });
+  } else {
+    cfg.token = String(qs.get('token') || (MODE === 'view' ? getStoredToken(cfg.room) : '')).trim();
   }
 
   /* ---------- 実行時状態 ---------- */
@@ -92,9 +111,11 @@
    *  API 通信
    *  POST は text/plain で送る（CORS のプリフライトを避けるため）
    * ============================================================ */
+  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'];
+
   async function api(action, payload = {}, { method = 'POST' } = {}) {
     if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl に GAS ウェブアプリの URL を設定してください'), { code: 'no_api' });
-    if (!cfg.token) throw Object.assign(new Error('アクセストークンが未設定です'), { code: 'unauthorized' });
+    if (!cfg.token && !NO_AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('合言葉が未設定です'), { code: 'unauthorized' });
     const body = Object.assign({ action, room: cfg.room, token: cfg.token }, payload);
     const t0 = Date.now();
     let res;
@@ -120,8 +141,10 @@
 
   function errorMessage(code) {
     const map = {
-      unauthorized: 'トークンが正しくありません。接続設定を確認してください',
-      forbidden: 'この操作には管理者トークンが必要です',
+      unauthorized: '合言葉（または閲覧キー）が違います',
+      room_not_found: 'このルームはまだありません。ルーム名を確認するか、新しく作成してください',
+      locked: '合言葉を続けて間違えたため、このルームは 10 分間入れません',
+      forbidden: 'この操作には進行役の合言葉が必要です',
       method_not_allowed: '許可されていない呼び出し方です',
     };
     return map[code] || code || '不明なエラー';
@@ -151,14 +174,14 @@
     clearTimeout(st.pollTimer);
     if (cfg.api && cfg.token) {
       try {
-        await api('state', {}, { method: 'GET' });
+        await api('state', {});
         st.failCount = 0;
         setOnline(true);
         if (st.role === 'admin' && MODE === 'control' && !st.info) loadShareInfo();
       } catch (e) {
         st.failCount++;
         setOnline(false, e.message);
-        if (e.code === 'unauthorized' && MODE !== 'overlay' && st.failCount === 1) openSettings(e.message);
+        if (['unauthorized', 'room_not_found', 'locked'].includes(e.code) && MODE === 'control' && st.failCount === 1) openSettings(e.message);
       }
     } else {
       setOnline(false, '未設定');
@@ -176,7 +199,7 @@
       setText('#connText', ok ? '同期中' : '未接続' + (msg ? '：' + msg : ''));
     }
     $('#ovDot')?.classList.toggle('offline', !ok);
-    setText('#roleLabel', st.role === 'admin' ? '管理者' : st.role === 'viewer' ? '閲覧のみ' : '未接続');
+    setText('#roleLabel', st.role === 'admin' ? '進行役' : st.role === 'viewer' ? '閲覧のみ' : '未接続');
   }
 
   async function loadShareInfo() {
@@ -386,7 +409,7 @@
       clearTimeout(st.checkTimer);
       st.checkTimer = setTimeout(async () => {
         try {
-          const r = await api('check', {}, { method: 'GET' });
+          const r = await api('check', {});
           if (r.notified !== null && r.notified !== undefined && st.role === 'admin' && MODE === 'control') {
             toast(`Teams に「${thresholdLabel(r.notified)}」を通知しました`);
           }
@@ -434,7 +457,7 @@
       await api(action, payload);
     } catch (e) {
       toast(e.message, true);
-      try { const r = await api('state', {}, { method: 'GET' }); applyState(r.state, true); } catch { /* 次回ポーリングで回復 */ }
+      try { const r = await api('state', {}); applyState(r.state, true); } catch { /* 次回ポーリングで回復 */ }
     } finally {
       st.busy = false;
       document.body.classList.remove('is-busy');
@@ -551,7 +574,10 @@
   });
 
   /* ============================================================
-   *  接続設定
+   *  ルームと合言葉
+   *  - 既存ルーム：合言葉で入室
+   *  - 未作成ルーム：確認入力のあと、その合言葉でルームを作成
+   *  - 入室後：合言葉の変更・ルーム削除（進行役のみ）
    * ============================================================ */
   function openSettings(message) {
     const dlg = $('#settingsDlg');
@@ -560,39 +586,129 @@
     $('#setApi').value = cfg.api;
     $('#setRoom').value = cfg.room;
     $('#setToken').value = cfg.token;
+    $('#setTokenConfirm').value = '';
+    $('#fieldConfirm').hidden = true;
+    $('#newPass').value = '';
+    $('#newPassConfirm').value = '';
+    setText('#passResult', '');
+    setText('#btnSaveSettings', '入る');
     setText('#setResult', message || '');
     dlg.showModal();
   }
 
-  function bindSettings() {
-    $('#btnSettings').addEventListener('click', () => openSettings());
-    $('#btnShowToken').addEventListener('click', (e) => {
-      const input = $('#setToken');
-      input.type = input.type === 'password' ? 'text' : 'password';
-      e.target.textContent = input.type === 'password' ? '表示' : '隠す';
-    });
-    $('#btnSaveSettings').addEventListener('click', async () => {
-      if (!API_FIXED) cfg.api = $('#setApi').value.trim();
-      cfg.room = sanitizeRoom($('#setRoom').value);
-      cfg.token = $('#setToken').value.trim();
-      saveSaved({ api: API_FIXED ? '' : cfg.api, room: cfg.room, token: cfg.token });
+  async function enterRoom() {
+    if (!API_FIXED) cfg.api = $('#setApi').value.trim();
+    const room = $('#setRoom').value.trim();
+    const pass = $('#setToken').value;
+    if (!ROOM_RE.test(room)) { setText('#setResult', 'ルーム名は半角英数字と - _ の 40 文字以内にしてください'); return; }
+    if (pass.length < 4 || pass.length > 64) { setText('#setResult', '合言葉は 4〜64 文字で入力してください'); return; }
+    if (!API_FIXED) saveSaved({ api: cfg.api });
+
+    const btn = $('#btnSaveSettings');
+    btn.disabled = true;
+    try {
+      const creating = !$('#fieldConfirm').hidden;
+      if (creating) {
+        if ($('#setTokenConfirm').value !== pass) { setText('#setResult', '確認用の合言葉が一致しません'); return; }
+        cfg.room = room;
+        await api('createRoom', { passcode: pass });
+        cfg.token = pass;
+        storeToken(room, pass);
+        toast(`ルーム「${room}」を作りました。合言葉は参加する進行役にだけ伝えてください`);
+      } else {
+        cfg.room = room;
+        const info = await api('roomInfo');
+        if (!info.exists) {
+          $('#fieldConfirm').hidden = false;
+          $('#setTokenConfirm').focus();
+          setText('#btnSaveSettings', 'この合言葉でルームを作る');
+          setText('#setResult', `「${room}」はまだありません。合言葉をもう一度入力すると作成します`);
+          return;
+        }
+        cfg.token = pass;
+        const r = await api('state');
+        storeToken(room, pass);
+        toast(r.role === 'admin' ? '進行役として入室しました' : '閲覧のみで入室しました');
+      }
       st.state = null;
       st.info = null;
-      st.role = null;
       st.failCount = 0;
-      setText('#setResult', '接続を確認しています…');
-      try {
-        const r = await api('state', {}, { method: 'GET' });
-        applyState(r.state, true);
-        setOnline(true);
-        $('#settingsDlg').close();
-        toast(st.role === 'admin' ? '管理者として接続しました' : '閲覧のみで接続しました');
-        if (st.role === 'admin') loadShareInfo();
-        pollLoop();
-      } catch (e) {
-        setText('#setResult', e.message);
-      }
+      const r = await api('state');
+      applyState(r.state, true);
+      setOnline(true);
+      $('#settingsDlg').close();
+      if (st.role === 'admin') loadShareInfo();
+      pollLoop();
+    } catch (e) {
+      setText('#setResult', e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function changePass() {
+    const np = $('#newPass').value;
+    if (np.length < 4 || np.length > 64) { setText('#passResult', '4〜64 文字で入力してください'); return; }
+    if (/^\s|\s$/.test(np)) { setText('#passResult', '先頭と末尾に空白は使えません'); return; }
+    if (np !== $('#newPassConfirm').value) { setText('#passResult', '確認用と一致しません'); return; }
+    if (np === cfg.token) { setText('#passResult', '今と同じ合言葉です'); return; }
+    try {
+      await api('changePasscode', { newPasscode: np });
+      cfg.token = np;
+      storeToken(cfg.room, np);
+      $('#setToken').value = np;
+      $('#newPass').value = '';
+      $('#newPassConfirm').value = '';
+      setText('#passResult', '');
+      toast('合言葉を変更しました');
+    } catch (e) {
+      setText('#passResult', e.message);
+    }
+  }
+
+  async function deleteRoom() {
+    const room = cfg.room;
+    const typed = prompt(`ルーム「${room}」を削除します。確認のためルーム名を入力してください`);
+    if (typed === null) return;
+    if (typed.trim() !== room) { toast('ルーム名が一致しないため削除しませんでした', true); return; }
+    try {
+      await api('deleteRoom');
+      storeToken(room, '');
+      cfg.token = '';
+      st.state = null;
+      st.role = null;
+      st.info = null;
+      $('#settingsDlg').close();
+      toast(`ルーム「${room}」を削除しました`);
+      openSettings('別のルームに入るか、新しく作成してください');
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  function bindSettings() {
+    $('#btnSettings').addEventListener('click', () => openSettings());
+    $$('[data-reveal]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const input = $('#' + b.dataset.reveal);
+        input.type = input.type === 'password' ? 'text' : 'password';
+        b.textContent = input.type === 'password' ? '表示' : '隠す';
+      });
     });
+    // ルーム名や合言葉を変えたら「作成」モードを解除
+    ['#setRoom', '#setToken'].forEach((sel) => $(sel).addEventListener('input', () => {
+      if (!$('#fieldConfirm').hidden) {
+        $('#fieldConfirm').hidden = true;
+        setText('#btnSaveSettings', '入る');
+        setText('#setResult', '');
+      }
+    }));
+    ['#setRoom', '#setToken', '#setTokenConfirm'].forEach((sel) => $(sel).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); enterRoom(); }
+    }));
+    $('#btnSaveSettings').addEventListener('click', enterRoom);
+    $('#btnChangePass').addEventListener('click', changePass);
+    $('#btnDeleteRoom').addEventListener('click', deleteRoom);
   }
 
   /* ============================================================
@@ -785,11 +901,22 @@
   function bindShare() {
     $('#btnShare').addEventListener('click', async () => {
       if (!st.info) await loadShareInfo();
-      if (!st.info || !st.info.viewerToken) { toast('閲覧用トークンを取得できません。GAS で setup() を実行してください', true); return; }
+      if (!st.info || !st.info.viewerToken) { toast('閲覧キーを取得できません。入り直してから再度お試しください', true); return; }
       updateShareUrls();
       $('#shareDlg').showModal();
     });
     ['#ovBg', '#ovPos', '#ovSize', '#ovShowTitle', '#ovShowBar', '#ovHideIdle'].forEach((sel) => $(sel).addEventListener('change', updateShareUrls));
+    $('#btnRotateViewer').addEventListener('click', async () => {
+      if (!confirm('閲覧キーを作り直すと、配布済みのオーバーレイ URL と閲覧用 URL は使えなくなります。OBS の URL も貼り直しが必要です。続けますか？')) return;
+      try {
+        const r = await api('rotateViewerKey');
+        st.info = Object.assign({}, st.info, { viewerToken: r.viewerKey });
+        updateShareUrls();
+        toast('閲覧キーを作り直しました。新しい URL を配布してください');
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
     $$('[data-copy]').forEach((b) => {
       b.addEventListener('click', async () => {
         const input = $('#' + b.dataset.copy);
@@ -833,7 +960,7 @@
       if (qs.get('title') === '0') document.body.classList.add('no-title');
       if (qs.get('bar') === '0') document.body.classList.add('no-bar');
       if (qs.get('hideIdle') === '1') document.body.classList.add('hide-idle');
-      if (!cfg.api || !cfg.token) setText('#ovTitle', cfg.api ? 'URL に token を指定してください' : 'config.js の apiUrl を設定してください');
+      if (!cfg.api || !cfg.token) setText('#ovTitle', cfg.api ? '共有ダイアログのオーバーレイ URL を使ってください' : 'config.js の apiUrl を設定してください');
     } else {
       bindControls();
       bindSettings();
@@ -841,7 +968,7 @@
       bindShare();
       renderSoundButton();
       setText('#roomName', cfg.room);
-      if (!cfg.api || !cfg.token) openSettings('最初に接続先を設定してください');
+      if (!cfg.api || !cfg.token) openSettings('ルーム名と合言葉を入力してください');
     }
 
     pollLoop();

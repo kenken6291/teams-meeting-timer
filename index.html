@@ -26,7 +26,7 @@
         <button class="btn ghost" id="btnSound" type="button" title="しきい値で音を鳴らす">音 オン</button>
         <button class="btn ghost admin-only" id="btnShare" type="button">オーバーレイ・共有URL</button>
         <button class="btn ghost" id="btnFullscreen" type="button" title="全画面表示">全画面</button>
-        <button class="btn ghost" id="btnSettings" type="button">接続設定</button>
+        <button class="btn ghost" id="btnSettings" type="button">ルームと合言葉</button>
       </div>
     </header>
 
@@ -172,21 +172,46 @@
     </div>
   </dialog>
 
-  <!-- ===================== 接続設定 ===================== -->
+  <!-- ===================== ルームと合言葉 ===================== -->
   <dialog id="settingsDlg" class="dlg">
     <form method="dialog" class="dlg-head">
-      <h2>接続設定</h2>
+      <h2>ルームに入る</h2>
       <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
     </form>
-    <p class="hint">管理者から受け取ったトークンを入力してください。このブラウザにだけ保存されます。</p>
+    <p class="hint">進行役が決めたルーム名と合言葉で入ります。まだ無いルーム名を入れると、その合言葉で新しいルームを作ります。</p>
+
     <label class="field" id="fieldApi">API の URL（GAS ウェブアプリ。config.js で設定していない場合のみ）<input id="setApi" type="url" placeholder="https://script.google.com/macros/s/…/exec"></label>
-    <label class="field">ルーム名<input id="setRoom" type="text" maxlength="40" placeholder="default（英数字と - _）"></label>
-    <label class="field">アクセストークン
-      <span class="row"><input id="setToken" class="grow" type="password" autocomplete="off"><button class="btn ghost small" type="button" id="btnShowToken">表示</button></span>
+    <label class="field">ルーム名（半角英数字と - _、40文字まで）<input id="setRoom" type="text" maxlength="40" placeholder="例：sales-weekly" autocomplete="off"></label>
+    <label class="field">合言葉（4〜64文字）
+      <span class="row"><input id="setToken" class="grow" type="password" maxlength="64" autocomplete="off"><button class="btn ghost small" type="button" data-reveal="setToken">表示</button></span>
+    </label>
+    <label class="field" id="fieldConfirm" hidden>確認のため、合言葉をもう一度
+      <input id="setTokenConfirm" type="password" maxlength="64" autocomplete="off">
     </label>
     <div class="row between">
       <span class="hint" id="setResult"></span>
-      <button class="btn primary" type="button" id="btnSaveSettings">保存して接続</button>
+      <button class="btn primary" type="button" id="btnSaveSettings">入る</button>
+    </div>
+
+    <div class="admin-only dlg-section">
+      <h3>合言葉を変える</h3>
+      <p class="hint">変更すると、他の端末で操作中の人も新しい合言葉で入り直す必要があります。オーバーレイと閲覧用 URL はそのまま使えます。</p>
+      <label class="field">新しい合言葉
+        <span class="row"><input id="newPass" class="grow" type="password" maxlength="64" autocomplete="new-password"><button class="btn ghost small" type="button" data-reveal="newPass">表示</button></span>
+      </label>
+      <label class="field">確認のため、もう一度<input id="newPassConfirm" type="password" maxlength="64" autocomplete="new-password"></label>
+      <div class="row between">
+        <span class="hint" id="passResult"></span>
+        <button class="btn" type="button" id="btnChangePass">合言葉を変更</button>
+      </div>
+    </div>
+
+    <div class="admin-only dlg-section">
+      <h3>ルームを削除</h3>
+      <div class="row between">
+        <p class="hint">アジェンダと合言葉がすべて消えます。元に戻せません。</p>
+        <button class="btn subtle-danger" type="button" id="btnDeleteRoom">このルームを削除</button>
+      </div>
     </div>
   </dialog>
 
@@ -239,7 +264,10 @@
     <label class="field">閲覧専用 URL（操作できない大きな表示）
       <span class="row"><input id="viewUrl" class="grow" type="text" readonly><button class="btn small" type="button" data-copy="viewUrl">コピー</button></span>
     </label>
-    <p class="hint">どちらも閲覧用トークン入りです。社外に共有しないでください。</p>
+    <div class="row between">
+      <p class="hint">どちらも閲覧キー入りです。社外に共有しないでください。</p>
+      <button class="btn ghost small" type="button" id="btnRotateViewer">閲覧キーを作り直す</button>
+    </div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

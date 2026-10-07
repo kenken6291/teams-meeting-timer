@@ -319,6 +319,8 @@ body.is-admin .agenda-list li:hover { background: #2a3750; }
 .dlg-head h2 { margin: 0; font-size: 18px; }
 .dlg .field { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; color: var(--muted); font-size: 13px; }
 .dlg .field input, .dlg .field select { color: var(--text); font-size: 15px; }
+.dlg-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+.dlg-section h3 { margin: 0 0 4px; font-size: 15px; }
 .dlg .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .row.end { justify-content: flex-end; }

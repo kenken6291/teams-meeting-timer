@@ -14,12 +14,19 @@
  *   GEMINI_MODEL                : 任意。既定 gemini-2.5-flash
  *   TEAMS_WEBHOOK_URL           : Teams Workflows の Webhook URL（通知に必須）
  *   TEAMS_WEBHOOK_URL__<room>   : 任意。ルーム別の投稿先（例 TEAMS_WEBHOOK_URL__sales）
- *   ADMIN_TOKEN                 : 操作用トークン（setup() で自動生成）
- *   VIEWER_TOKEN                : 閲覧・オーバーレイ用トークン（setup() で自動生成）
+ *   MASTER_TOKEN                : 管理者用の非常鍵（setup() で自動生成）。全ルームを操作でき、
+ *                                 進行役が合言葉を忘れたときの復旧に使う
  *   ALLOWED_FOLDER_ID           : 推奨。解析を許可する Drive フォルダ ID
  *   PUBLIC_VIEW_URL             : 任意。カードに「タイマーを開く」ボタンを付ける URL
  *
- *  初回は エディタで setup() を実行 → 権限承認 → ログに出るトークンを控える。
+ *  アクセス制御（ルームごと）
+ *   - 進行役がルーム名と「合言葉」を自分で決めてルームを作成する（createRoom）
+ *   - 合言葉は SHA-256（ソルト付き）で保存し、平文では持たない
+ *   - 合言葉は進行役がいつでも変更できる（changePasscode）
+ *   - 閲覧・オーバーレイ用の「閲覧キー」はルームごとに自動発行、作り直し可能（rotateViewerKey）
+ *   - 合言葉を 10 回間違えると、そのルームは 10 分間ロック
+ *
+ *  初回は エディタで setup() を実行 → 権限承認。
  * ============================================================
  */
 
@@ -36,7 +43,13 @@ const CONFIG = Object.freeze({
   MAX_STATE_BYTES: 9000,                // Script Properties は 1 値 9KB まで
   TZ: 'Asia/Tokyo',
   ROOM_PREFIX: 'room:',
+  AUTH_PREFIX: 'auth:',
   ACTIVE_ROOMS_KEY: 'activeRooms',
+  MAX_ROOMS: 200,
+  PASS_MIN: 4,
+  PASS_MAX: 64,
+  FAIL_LIMIT: 10,
+  LOCK_SEC: 600,
 });
 
 const VIEWER_ACTIONS = ['state', 'check'];
@@ -78,14 +91,26 @@ function safeRoute_(p, method) {
 
 function route_(p, method) {
   const action = String(p.action || 'state');
-  const role = authenticate_(p.token);
-  if (!role) return { ok: false, error: 'unauthorized' };
+  const room = sanitizeRoom_(p.room);
+
+  // 認証不要：ルームの有無確認と新規作成
+  if (action === 'roomInfo') {
+    return { ok: true, room: room, exists: !!loadAuth_(room) };
+  }
+  if (action === 'createRoom') {
+    if (method !== 'POST') return { ok: false, error: 'method_not_allowed' };
+    createRoom_(room, p.passcode);
+    return { ok: true, role: 'admin', room: room, state: loadState_(room) };
+  }
+
+  const auth = authenticate_(room, p.token);
+  if (!auth.role) return { ok: false, error: auth.error };
+  const role = auth.role;
 
   const isViewerAction = VIEWER_ACTIONS.indexOf(action) >= 0;
   if (!isViewerAction && role !== 'admin') return { ok: false, error: 'forbidden', role: role };
   if (method === 'GET' && !isViewerAction) return { ok: false, error: 'method_not_allowed' };
 
-  const room = sanitizeRoom_(p.room);
   const base = { ok: true, role: role };
 
   if (action === 'state') {
@@ -117,10 +142,18 @@ function route_(p, method) {
       if (!res.ok) throw new Error('Teams への送信に失敗しました: ' + (res.error || res.code));
       return Object.assign(base, { sent: true });
     }
+    case 'changePasscode':
+      changePasscode_(room, p.newPasscode);
+      return Object.assign(base, { changed: true });
+    case 'rotateViewerKey':
+      return Object.assign(base, { viewerKey: rotateViewerKey_(room) });
+    case 'deleteRoom':
+      deleteRoom_(room);
+      return Object.assign(base, { deleted: true });
     case 'shareInfo':
       return Object.assign(base, {
         info: {
-          viewerToken: prop_('VIEWER_TOKEN') || '',
+          viewerToken: (loadAuth_(room) || {}).viewerKey || '',
           hasWebhook: !!webhookUrl_(room),
           hasGemini: !!prop_('GEMINI_API_KEY'),
           model: prop_('GEMINI_MODEL', CONFIG.DEFAULT_MODEL),
@@ -145,14 +178,105 @@ function prop_(key, def) {
   return (v === null || v === '') ? (def === undefined ? null : def) : v;
 }
 
-function authenticate_(token) {
-  const t = String(token || '').trim();
-  if (!t) return null;
-  const admin = prop_('ADMIN_TOKEN');
-  const viewer = prop_('VIEWER_TOKEN');
-  if (admin && t === admin) return 'admin';
-  if (viewer && t === viewer) return 'viewer';
-  return null;
+/* ------------------------------------------------------------
+ *  ルームの合言葉（進行役が自由に設定・変更）
+ * ---------------------------------------------------------- */
+
+function loadAuth_(room) {
+  const raw = props_().getProperty(CONFIG.AUTH_PREFIX + room);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function saveAuth_(room, a) {
+  a.updatedAt = Date.now();
+  props_().setProperty(CONFIG.AUTH_PREFIX + room, JSON.stringify(a));
+}
+
+function hashPass_(salt, pass) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+    salt + ':' + pass, Utilities.Charset.UTF_8);
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+
+function validatePasscode_(pass) {
+  const p = String(pass === undefined || pass === null ? '' : pass);
+  if (p.length < CONFIG.PASS_MIN || p.length > CONFIG.PASS_MAX) {
+    throw new Error('合言葉は ' + CONFIG.PASS_MIN + '〜' + CONFIG.PASS_MAX + ' 文字で設定してください');
+  }
+  if (/^\s|\s$/.test(p)) throw new Error('合言葉の先頭と末尾に空白は使えません');
+  return p;
+}
+
+function newViewerKey_() {
+  return 'v' + (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 31);
+}
+
+function createRoom_(room, passcode) {
+  const pass = validatePasscode_(passcode);
+  withLock_(function () {
+    if (loadAuth_(room)) throw new Error('このルーム名はすでに使われています。別の名前にするか、合言葉で入室してください');
+    const count = Object.keys(props_().getProperties())
+      .filter(function (k) { return k.indexOf(CONFIG.AUTH_PREFIX) === 0; }).length;
+    if (count >= CONFIG.MAX_ROOMS) throw new Error('ルーム数が上限に達しています。使わないルームを削除してください');
+    const salt = Utilities.getUuid();
+    saveAuth_(room, { salt: salt, hash: hashPass_(salt, pass), viewerKey: newViewerKey_(), createdAt: Date.now() });
+    saveState_(defaultState_(room));
+  });
+}
+
+function changePasscode_(room, newPasscode) {
+  const pass = validatePasscode_(newPasscode);
+  withLock_(function () {
+    const a = loadAuth_(room);
+    if (!a) throw new Error('ルームが見つかりません');
+    a.salt = Utilities.getUuid();
+    a.hash = hashPass_(a.salt, pass);
+    saveAuth_(room, a);
+  });
+}
+
+function rotateViewerKey_(room) {
+  return withLock_(function () {
+    const a = loadAuth_(room);
+    if (!a) throw new Error('ルームが見つかりません');
+    a.viewerKey = newViewerKey_();
+    saveAuth_(room, a);
+    return a.viewerKey;
+  });
+}
+
+function deleteRoom_(room) {
+  withLock_(function () {
+    props_().deleteProperty(CONFIG.AUTH_PREFIX + room);
+    props_().deleteProperty(CONFIG.ROOM_PREFIX + room);
+    const rooms = getActiveRooms_();
+    const i = rooms.indexOf(room);
+    if (i >= 0) { rooms.splice(i, 1); setActiveRooms_(rooms); }
+  });
+}
+
+/** 戻り値 { role: 'admin'|'viewer'|null, error } */
+function authenticate_(room, token) {
+  const t = String(token === undefined || token === null ? '' : token);
+  if (!t) return { role: null, error: 'unauthorized' };
+
+  const master = prop_('MASTER_TOKEN');
+  if (master && t === master) return { role: 'admin' };
+
+  const a = loadAuth_(room);
+  if (!a) return { role: null, error: 'room_not_found' };
+
+  const cache = CacheService.getScriptCache();
+  const failKey = 'fail:' + room;
+  const fails = Number(cache.get(failKey) || 0);
+  if (fails >= CONFIG.FAIL_LIMIT) return { role: null, error: 'locked' };
+
+  if (t === a.viewerKey) return { role: 'viewer' };
+  if (hashPass_(a.salt, t) === a.hash) return { role: 'admin' };
+
+  cache.put(failKey, String(fails + 1), CONFIG.LOCK_SEC);
+  return { role: null, error: 'unauthorized' };
 }
 
 function sanitizeRoom_(room) {
@@ -787,23 +911,46 @@ function listAgendaFiles_() {
  *  セットアップ・保守（エディタから手動実行）
  * ---------------------------------------------------------- */
 
-/** 初回実行：トークン生成とトリガー登録。ログに出るトークンを控えること */
+/** 初回実行：非常鍵（MASTER_TOKEN）の生成とトリガー登録 */
 function setup() {
   const p = props_();
-  if (!p.getProperty('ADMIN_TOKEN')) p.setProperty('ADMIN_TOKEN', randomToken_());
-  if (!p.getProperty('VIEWER_TOKEN')) p.setProperty('VIEWER_TOKEN', randomToken_());
+  if (!p.getProperty('MASTER_TOKEN')) p.setProperty('MASTER_TOKEN', randomToken_());
   installTrigger();
-  console.log('ADMIN_TOKEN  : ' + p.getProperty('ADMIN_TOKEN'));
-  console.log('VIEWER_TOKEN : ' + p.getProperty('VIEWER_TOKEN'));
+  console.log('MASTER_TOKEN : ' + p.getProperty('MASTER_TOKEN') + '（非常用。普段は使わず厳重に保管）');
   console.log('Webhook      : ' + (p.getProperty('TEAMS_WEBHOOK_URL') ? '設定済み' : '未設定'));
   console.log('Gemini       : ' + (p.getProperty('GEMINI_API_KEY') ? '設定済み' : '未設定'));
+  console.log('ルーム数     : ' + Object.keys(p.getProperties())
+    .filter(function (k) { return k.indexOf(CONFIG.AUTH_PREFIX) === 0; }).length);
 }
 
-/** トークンを作り直す（漏えい時）。古い URL はすべて無効になる */
-function rotateTokens() {
-  props_().setProperty('ADMIN_TOKEN', randomToken_());
-  props_().setProperty('VIEWER_TOKEN', randomToken_());
+/** 非常鍵を作り直す（漏えい時） */
+function rotateMasterToken() {
+  props_().setProperty('MASTER_TOKEN', randomToken_());
   setup();
+}
+
+/**
+ * 進行役が合言葉を忘れたときの復旧用。
+ * ROOM と NEW_PASSCODE を書き換えてから実行し、終わったら元に戻すこと。
+ * （画面から MASTER_TOKEN を合言葉として入室し、合言葉を変更する方法でも復旧できます）
+ */
+function resetForgottenPasscode() {
+  const ROOM = 'default';
+  const NEW_PASSCODE = 'change-me-1234';
+  changePasscode_(sanitizeRoom_(ROOM), NEW_PASSCODE);
+  CacheService.getScriptCache().remove('fail:' + ROOM);
+  console.log('ルーム「' + ROOM + '」の合言葉を再設定しました');
+}
+
+/** ルーム一覧をログに出す */
+function listRooms() {
+  Object.keys(props_().getProperties())
+    .filter(function (k) { return k.indexOf(CONFIG.AUTH_PREFIX) === 0; })
+    .forEach(function (k) {
+      const room = k.slice(CONFIG.AUTH_PREFIX.length);
+      const a = loadAuth_(room);
+      console.log(room + '  作成 ' + Utilities.formatDate(new Date(a.createdAt), CONFIG.TZ, 'yyyy-MM-dd HH:mm'));
+    });
 }
 
 function randomToken_() {
@@ -833,11 +980,11 @@ function testGemini() {
   console.log(JSON.stringify(r, null, 2));
 }
 
-/** 全ルームの状態を削除（トークン・APIキーは残す） */
+/** 全ルーム（合言葉と状態）を削除。API キー・Webhook・非常鍵は残す */
 function clearAllRooms() {
   const p = props_();
   Object.keys(p.getProperties()).forEach(function (k) {
-    if (k.indexOf(CONFIG.ROOM_PREFIX) === 0) p.deleteProperty(k);
+    if (k.indexOf(CONFIG.ROOM_PREFIX) === 0 || k.indexOf(CONFIG.AUTH_PREFIX) === 0) p.deleteProperty(k);
   });
   p.deleteProperty(CONFIG.ACTIVE_ROOMS_KEY);
 }
