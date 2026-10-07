@@ -123,7 +123,13 @@ function route_(p, method) {
   }
 
   if (COMMAND_ACTIONS.indexOf(action) >= 0) {
-    mutate_(room, function (s, now) { applyCommand_(s, action, p, now); });
+    const opId = String(p.opId || '').slice(0, 40);
+    mutate_(room, function (s, now) {
+      if (!Array.isArray(s.ops)) s.ops = [];
+      if (opId && s.ops.indexOf(opId) >= 0) return;   // 再送された同じ操作は無視
+      applyCommand_(s, action, p, now);
+      if (opId) s.ops = s.ops.concat(opId).slice(-20);
+    });
     // 「−1分」などで一気にしきい値を跨いだ場合に即通知
     if (action === 'adjust' || action === 'start' || action === 'toggle') runAlertCheck_(room);
     return Object.assign(base, { state: loadState_(room) });
@@ -314,6 +320,7 @@ function defaultState_(room) {
     fired: [],
     notify: true,
     lastNotice: null,
+    ops: [],               // 処理済みの操作 ID（通信の再送による二重実行を防ぐ）
     version: 0,
     updatedAt: 0,
   };

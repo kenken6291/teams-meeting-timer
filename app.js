@@ -113,30 +113,73 @@
    * ============================================================ */
   const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'];
 
+  /** 状態を変える操作。通信の再送で二重に実行されないよう opId を付ける */
+  const COMMAND_ACTIONS = ['start', 'pause', 'toggle', 'reset', 'adjust', 'select', 'next', 'prev',
+    'setDuration', 'setAgenda', 'setOptions'];
+  const RETRY_STATUS = [404, 408, 429, 500, 502, 503, 504];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const newOpId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+
+  /**
+   * GAS への通信。
+   * GAS は POST の結果を一度 script.googleusercontent.com へリダイレクトして返すため、
+   * 混雑時や同時アクセス時にこのリダイレクト先が 404 などになることがある。
+   * そのため一時的なエラーは最大 3 回まで自動で再送する（操作は opId でサーバー側が重複排除）。
+   */
   async function api(action, payload = {}, { method = 'POST' } = {}) {
     if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl に GAS ウェブアプリの URL を設定してください'), { code: 'no_api' });
     if (!cfg.token && !NO_AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('合言葉が未設定です'), { code: 'unauthorized' });
     const body = Object.assign({ action, room: cfg.room, token: cfg.token }, payload);
-    const t0 = Date.now();
-    let res;
-    if (method === 'GET') {
-      res = await fetch(cfg.api + (cfg.api.includes('?') ? '&' : '?') + new URLSearchParams(body).toString(), { cache: 'no-store' });
-    } else {
-      res = await fetch(cfg.api, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(body),
-      });
+    if (COMMAND_ACTIONS.includes(action) && !body.opId) body.opId = newOpId();
+
+    const MAX_TRY = 3;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= MAX_TRY; attempt++) {
+      const t0 = Date.now();
+      let res;
+      try {
+        if (method === 'GET') {
+          res = await fetch(cfg.api + (cfg.api.includes('?') ? '&' : '?') + new URLSearchParams(body).toString(),
+            { cache: 'no-store', redirect: 'follow' });
+        } else {
+          res = await fetch(cfg.api, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body),
+            redirect: 'follow',
+            cache: 'no-store',
+          });
+        }
+      } catch (e) {
+        lastErr = new Error('サーバーに接続できません（ネットワークを確認してください）');
+        if (attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
+        throw lastErr;
+      }
+      const t1 = Date.now();
+
+      if (!res.ok) {
+        lastErr = new Error(res.status === 404
+          ? '通信エラー（HTTP 404）。config.js の URL と、GAS が最新バージョンでデプロイされているか確認してください'
+          : '通信エラー（HTTP ' + res.status + '）');
+        if (RETRY_STATUS.includes(res.status) && attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
+        throw lastErr;
+      }
+
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        lastErr = new Error('API の応答を読めません。URL が「/exec」で終わっているか、デプロイのアクセス権が「全員」か確認してください');
+        if (attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
+        throw lastErr;
+      }
+      if (data.serverNow) syncClock(data.serverNow, t0, t1);
+      if (data.role) st.role = data.role;
+      if (!data.ok) throw Object.assign(new Error(errorMessage(data.error)), { code: data.error });
+      if (data.state) applyState(data.state);
+      return data;
     }
-    const t1 = Date.now();
-    if (!res.ok) throw new Error('通信エラー（HTTP ' + res.status + '）');
-    let data;
-    try { data = await res.json(); } catch { throw new Error('API の応答を読めません。URL が「/exec」で終わっているか確認してください'); }
-    if (data.serverNow) syncClock(data.serverNow, t0, t1);
-    if (data.role) st.role = data.role;
-    if (!data.ok) throw Object.assign(new Error(errorMessage(data.error)), { code: data.error });
-    if (data.state) applyState(data.state);
-    return data;
+    throw lastErr || new Error('通信エラー');
   }
 
   function errorMessage(code) {
@@ -450,6 +493,8 @@
    * ============================================================ */
   async function act(action, payload = {}) {
     if (st.busy) return;
+    // 「開始／一時停止」は画面の状態から明示的な命令に変換する（再送されても結果が変わらない）
+    if (action === 'toggle') action = st.state && st.state.status === 'running' ? 'pause' : 'start';
     st.busy = true;
     document.body.classList.add('is-busy');
     optimistic(action, payload);
@@ -467,10 +512,12 @@
   /** 開始・停止・時間調整は通信を待たずに画面へ反映（応答で正式な状態に置き換わる） */
   function optimistic(action, payload) {
     const cur = st.state;
-    if (!cur || !['toggle', 'adjust'].includes(action)) return;
+    if (!cur || !['toggle', 'start', 'pause', 'adjust'].includes(action)) return;
     const s = JSON.parse(JSON.stringify(cur));
     const n = now();
-    if (action === 'toggle') {
+    if (action === 'start' && s.status === 'running') return;
+    if (action === 'pause' && s.status !== 'running') return;
+    if (['toggle', 'start', 'pause'].includes(action)) {
       if (s.status === 'running') {
         s.remainingSec = (s.endsAt - n) / 1000;
         s.endsAt = null;
