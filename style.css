@@ -240,7 +240,7 @@ body[data-level="over"] .clock { animation: pulse 1s steps(2, jump-none) infinit
 .field-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .field-inline input { width: 5.5em; }
 
-input[type="text"], input[type="url"], input[type="password"], input[type="number"], select, textarea {
+input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"], select, textarea {
   background: var(--ink);
   border: 1px solid var(--line);
   border-radius: var(--radius-s);
@@ -527,3 +527,83 @@ body.mode-overlay.bg-green[data-level="over"] .ov-card,
 body.mode-overlay.bg-blue[data-level="over"] .ov-card,
 body.mode-overlay.bg-magenta[data-level="over"] .ov-card { background: #8e1d15; }
 body.mode-overlay.bg-blue { --accent: #f2f2f2; }
+
+/* ============================================================
+   会員認証（進行役）
+   ============================================================ */
+
+.login-only { display: none !important; }
+body.is-logged-in.mode-control .login-only { display: flex !important; }
+.user-box { align-items: center; gap: 6px; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--line); }
+.user-name { font-size: 13px; color: var(--text); white-space: nowrap; }
+
+body.auth-open .app { filter: blur(3px); pointer-events: none; user-select: none; }
+
+.auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+  overflow: auto;
+  background: rgba(13, 18, 28, .82);
+}
+.auth-card {
+  width: min(440px, 100%);
+  padding: 26px 26px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+.auth-title { margin: 0 0 4px; font-size: 22px; }
+.auth-tabs { margin-top: 14px; }
+.auth-pane { display: none; }
+.auth-pane.is-active { display: block; }
+.auth-card .field { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; color: var(--muted); font-size: 13px; }
+.auth-card .field input { color: var(--text); font-size: 15px; }
+.btn.block { width: 100%; min-height: 46px; margin-top: 6px; }
+.auth-links { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 14px 0 0; font-size: 13px; }
+.auth-links a { color: var(--accent); }
+
+.auth-msg { margin: 8px 0 0; min-height: 1.4em; font-size: 13px; }
+.auth-msg.error { color: #ff8a7d; }
+.auth-msg.info { color: var(--muted); }
+.auth-msg.success { color: var(--ok); }
+
+/* パスワード欄＋表示切替ボタン */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: 4.2em; }
+.pw-eye {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  min-height: 30px;
+  padding: 0 .7em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pw-eye:hover, .pw-eye[aria-pressed="true"] { color: var(--text); }
+
+/* パスワード解析（強さメーター） */
+.pw-meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 2px 0 4px; }
+.pw-meter i { height: 6px; border-radius: 3px; background: var(--panel-2); transition: background .2s; }
+.pw-meter[data-level="weak"]   i:nth-child(-n+1) { background: var(--danger); }
+.pw-meter[data-level="fair"]   i:nth-child(-n+2) { background: var(--warn); }
+.pw-meter[data-level="good"]   i:nth-child(-n+3) { background: var(--ok); }
+.pw-meter[data-level="strong"] i:nth-child(-n+4) { background: var(--ok); }
+.pw-meter-label { font-size: 12px; color: var(--muted); }
+.pw-checks { list-style: none; margin: 8px 0 4px; padding: 0; font-size: 13px; display: grid; gap: 2px; }
+.pw-checks li { display: flex; gap: 6px; color: var(--muted); }
+.pw-checks li span { width: 1em; flex: none; text-align: center; }
+.pw-checks li.req.ng { color: #f19a90; }
+.pw-checks li.ok { color: var(--ok); }
+.pw-checks li.opt.ng { color: var(--muted); }
+.pw-match { margin: 0; font-size: 13px; min-height: 1.4em; }
+.pw-match.ok { color: var(--ok); }
+.pw-match.ng { color: #f19a90; }

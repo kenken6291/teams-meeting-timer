@@ -84,8 +84,9 @@ function safeRoute_(p, method) {
   try {
     return route_(p, method);
   } catch (err) {
-    console.error(err && err.stack ? err.stack : err);
-    return { ok: false, error: String((err && err.message) || err) };
+    if (!(err && err.code)) console.error(err && err.stack ? err.stack : err);
+    const message = String((err && err.message) || err);
+    return { ok: false, error: (err && err.code) || message, message: message };
   }
 }
 
@@ -93,19 +94,27 @@ function route_(p, method) {
   const action = String(p.action || 'state');
   const room = sanitizeRoom_(p.room);
 
+  // 会員認証（Auth.gs）
+  if (AUTH_ACTIONS.indexOf(action) >= 0) return handleAuthAction_(action, p, method);
+
   // 認証不要：ルームの有無確認と新規作成
   if (action === 'roomInfo') {
     return { ok: true, room: room, exists: !!loadAuth_(room) };
   }
   if (action === 'createRoom') {
     if (method !== 'POST') return { ok: false, error: 'method_not_allowed' };
-    createRoom_(room, p.passcode);
+    const user = requireSession_(p.session, false);   // ルーム作成はログインした進行役のみ
+    createRoom_(room, p.passcode, user.email);
     return { ok: true, role: 'admin', room: room, state: loadState_(room) };
   }
 
   const auth = authenticate_(room, p.token);
   if (!auth.role) return { ok: false, error: auth.error };
   const role = auth.role;
+
+  // 進行役（合言葉）での操作はログインも必須。閲覧キー（OBS・閲覧画面）はログイン不要。非常鍵は例外
+  let user = null;
+  if (role === 'admin' && !auth.master) user = requireSession_(p.session, false);
 
   const isViewerAction = VIEWER_ACTIONS.indexOf(action) >= 0;
   if (!isViewerAction && role !== 'admin') return { ok: false, error: 'forbidden', role: role };
@@ -153,9 +162,14 @@ function route_(p, method) {
       return Object.assign(base, { changed: true });
     case 'rotateViewerKey':
       return Object.assign(base, { viewerKey: rotateViewerKey_(room) });
-    case 'deleteRoom':
+    case 'deleteRoom': {
+      const owner = (loadAuth_(room) || {}).owner;
+      if (!auth.master && owner && (!user || user.email !== owner)) {
+        return { ok: false, error: 'not_owner', message: 'ルームを削除できるのは作成した人だけです' };
+      }
       deleteRoom_(room);
       return Object.assign(base, { deleted: true });
+    }
     case 'shareInfo':
       return Object.assign(base, {
         info: {
@@ -218,7 +232,7 @@ function newViewerKey_() {
   return 'v' + (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 31);
 }
 
-function createRoom_(room, passcode) {
+function createRoom_(room, passcode, ownerEmail) {
   const pass = validatePasscode_(passcode);
   withLock_(function () {
     if (loadAuth_(room)) throw new Error('このルーム名はすでに使われています。別の名前にするか、合言葉で入室してください');
@@ -226,7 +240,7 @@ function createRoom_(room, passcode) {
       .filter(function (k) { return k.indexOf(CONFIG.AUTH_PREFIX) === 0; }).length;
     if (count >= CONFIG.MAX_ROOMS) throw new Error('ルーム数が上限に達しています。使わないルームを削除してください');
     const salt = Utilities.getUuid();
-    saveAuth_(room, { salt: salt, hash: hashPass_(salt, pass), viewerKey: newViewerKey_(), createdAt: Date.now() });
+    saveAuth_(room, { salt: salt, hash: hashPass_(salt, pass), viewerKey: newViewerKey_(), owner: ownerEmail || '', createdAt: Date.now() });
     saveState_(defaultState_(room));
   });
 }
@@ -268,7 +282,7 @@ function authenticate_(room, token) {
   if (!t) return { role: null, error: 'unauthorized' };
 
   const master = prop_('MASTER_TOKEN');
-  if (master && t === master) return { role: 'admin' };
+  if (master && t === master) return { role: 'admin', master: true };
 
   const a = loadAuth_(room);
   if (!a) return { role: null, error: 'room_not_found' };
@@ -922,7 +936,10 @@ function listAgendaFiles_() {
 function setup() {
   const p = props_();
   if (!p.getProperty('MASTER_TOKEN')) p.setProperty('MASTER_TOKEN', randomToken_());
+  if (!p.getProperty('PEPPER')) p.setProperty('PEPPER', randomToken_());
+  const sheet = membersSheet_();   // 会員スプレッドシートを用意（無ければ作成）
   installTrigger();
+  console.log('会員シート   : ' + sheet.getParent().getUrl());
   console.log('MASTER_TOKEN : ' + p.getProperty('MASTER_TOKEN') + '（非常用。普段は使わず厳重に保管）');
   console.log('Webhook      : ' + (p.getProperty('TEAMS_WEBHOOK_URL') ? '設定済み' : '未設定'));
   console.log('Gemini       : ' + (p.getProperty('GEMINI_API_KEY') ? '設定済み' : '未設定'));

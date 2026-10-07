@@ -111,7 +111,10 @@
    *  API 通信
    *  POST は text/plain で送る（CORS のプリフライトを避けるため）
    * ============================================================ */
-  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'];
+  /** 合言葉が無くても呼べる操作（会員認証と、ルームの確認・作成） */
+  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom', 'register', 'login', 'forgotPassword', 'changePassword', 'logout', 'me'];
+  const LOGIN_ERRORS = ['login_required', 'session_expired'];
+  const sessionToken = () => (MODE === 'control' && window.TimerAuth ? window.TimerAuth.token() : '');
 
   /** 状態を変える操作。通信の再送で二重に実行されないよう opId を付ける */
   const COMMAND_ACTIONS = ['start', 'pause', 'toggle', 'reset', 'adjust', 'select', 'next', 'prev',
@@ -129,7 +132,7 @@
   async function api(action, payload = {}, { method = 'POST' } = {}) {
     if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl に GAS ウェブアプリの URL を設定してください'), { code: 'no_api' });
     if (!cfg.token && !NO_AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('合言葉が未設定です'), { code: 'unauthorized' });
-    const body = Object.assign({ action, room: cfg.room, token: cfg.token }, payload);
+    const body = Object.assign({ action, room: cfg.room, token: cfg.token, session: sessionToken() }, payload);
     if (COMMAND_ACTIONS.includes(action) && !body.opId) body.opId = newOpId();
 
     const MAX_TRY = 3;
@@ -175,14 +178,23 @@
       }
       if (data.serverNow) syncClock(data.serverNow, t0, t1);
       if (data.role) st.role = data.role;
-      if (!data.ok) throw Object.assign(new Error(errorMessage(data.error)), { code: data.error });
+      if (!data.ok) {
+        const err = Object.assign(new Error(errorMessage(data.error, data.message)), { code: data.error });
+        // ログイン切れ・仮パスワードのままの場合は会員認証の画面へ（ログイン操作そのものは除く）
+        if (MODE === 'control' && window.TimerAuth && !['login', 'register', 'forgotPassword'].includes(action)) {
+          if (LOGIN_ERRORS.includes(data.error)) window.TimerAuth.requireLogin(err.message);
+          if (data.error === 'must_change_password') window.TimerAuth.forceChange();
+        }
+        throw err;
+      }
       if (data.state) applyState(data.state);
+      if (cfg.token) markSuccess();
       return data;
     }
     throw lastErr || new Error('通信エラー');
   }
 
-  function errorMessage(code) {
+  function errorMessage(code, serverMessage) {
     const map = {
       unauthorized: '合言葉（または閲覧キー）が違います',
       room_not_found: 'このルームはまだありません。ルーム名を確認するか、新しく作成してください',
@@ -190,7 +202,7 @@
       forbidden: 'この操作には進行役の合言葉が必要です',
       method_not_allowed: '許可されていない呼び出し方です',
     };
-    return map[code] || code || '不明なエラー';
+    return map[code] || serverMessage || code || '不明なエラー';
   }
 
   function syncClock(serverNow, t0, t1) {
@@ -213,24 +225,53 @@
     render();
   }
 
+  /** 状態の定期同期。失敗時は間隔を延ばし、どこかの通信が成功したらすぐ通常間隔に戻す */
+  let polling = false;
+  function schedulePoll(delay) {
+    clearTimeout(st.pollTimer);
+    st.pollTimer = setTimeout(pollLoop, delay);
+  }
+
   async function pollLoop() {
     clearTimeout(st.pollTimer);
-    if (cfg.api && cfg.token) {
-      try {
-        await api('state', {});
-        st.failCount = 0;
-        setOnline(true);
-        if (st.role === 'admin' && MODE === 'control' && !st.info) loadShareInfo();
-      } catch (e) {
-        st.failCount++;
-        setOnline(false, e.message);
-        if (['unauthorized', 'room_not_found', 'locked'].includes(e.code) && MODE === 'control' && st.failCount === 1) openSettings(e.message);
+    if (polling) return;
+    polling = true;
+    try {
+      if (cfg.api && cfg.token) {
+        try {
+          await api('state', {});
+          if (st.role === 'admin' && MODE === 'control' && !st.info) loadShareInfo();
+        } catch (e) {
+          markFailure(e);
+        }
+      } else {
+        setOnline(false, '未設定');
       }
-    } else {
-      setOnline(false, '未設定');
+    } finally {
+      polling = false;
     }
     const delay = st.failCount ? Math.min(cfg.poll * 2 ** st.failCount, 20000) : cfg.poll;
-    st.pollTimer = setTimeout(pollLoop, delay);
+    schedulePoll(delay);
+  }
+
+  function markSuccess() {
+    const wasFailing = st.failCount > 0 || !st.online;
+    st.failCount = 0;
+    setOnline(true);
+    if (wasFailing && !polling) schedulePoll(cfg.poll);   // 延びていた同期間隔を元に戻す
+  }
+
+  function markFailure(e) {
+    if (['unauthorized', 'room_not_found', 'locked'].includes(e.code)) {
+      st.failCount++;
+      setOnline(false, e.message);
+      if (MODE === 'control' && st.failCount === 1) openSettings(e.message);
+      return;
+    }
+    st.failCount++;
+    // 1 回の失敗では「未接続」にしない（GAS は一時的なエラーを返すことがあるため）
+    if (st.failCount >= 2) setOnline(false, e.message);
+    else setText('#connText', '再接続しています');
   }
 
   function setOnline(ok, msg) {
@@ -240,6 +281,7 @@
       el.classList.toggle('online', ok);
       el.classList.toggle('offline', !ok);
       setText('#connText', ok ? '同期中' : '未接続' + (msg ? '：' + msg : ''));
+      el.title = ok ? 'サーバーと同期しています' : (msg || '');
     }
     $('#ovDot')?.classList.toggle('offline', !ok);
     setText('#roleLabel', st.role === 'admin' ? '進行役' : st.role === 'viewer' ? '閲覧のみ' : '未接続');
@@ -596,7 +638,7 @@
     // キーボード操作
     document.addEventListener('keydown', (e) => {
       if (st.role !== 'admin' || MODE !== 'control') return;
-      if (document.querySelector('dialog[open]')) return;
+      if (document.querySelector('dialog[open]') || document.body.classList.contains('auth-open')) return;
       if (e.target.closest('input, textarea, select, button')) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const map = { ' ': ['toggle'], ArrowRight: ['next'], ArrowLeft: ['prev'], '+': ['adjust', 60], ';': ['adjust', 60], '=': ['adjust', 60], '-': ['adjust', -60] };
@@ -1015,11 +1057,19 @@
       bindShare();
       renderSoundButton();
       setText('#roomName', cfg.room);
-      if (!cfg.api || !cfg.token) openSettings('ルーム名と合言葉を入力してください');
     }
-
-    pollLoop();
     setInterval(render, 200);
+
+    if (MODE === 'control') {
+      if (!cfg.api) { openSettings('config.js の apiUrl を設定してください'); return; }
+      // 操作画面は進行役のログインが必要。ログインが済んでから同期を始める
+      window.TimerAuth.init(api, () => {
+        if (!cfg.token) openSettings('ルーム名と合言葉を入力してください');
+        pollLoop();
+      });
+    } else {
+      pollLoop();
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

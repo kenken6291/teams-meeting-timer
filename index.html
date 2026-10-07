@@ -6,7 +6,8 @@
   <meta name="robots" content="noindex,nofollow">
   <meta name="referrer" content="no-referrer">
   <title>会議タイマー</title>
-  <link rel="stylesheet" href="style.css">
+  <!-- 更新時は ?v= の値を変えると、ブラウザの古いキャッシュを使わずに読み込まれる -->
+  <link rel="stylesheet" href="style.css?v=20261008c">
 </head>
 <body data-level="idle" data-status="idle">
 
@@ -27,6 +28,11 @@
         <button class="btn ghost admin-only" id="btnShare" type="button">オーバーレイ・共有URL</button>
         <button class="btn ghost" id="btnFullscreen" type="button" title="全画面表示">全画面</button>
         <button class="btn ghost" id="btnSettings" type="button">ルームと合言葉</button>
+        <div class="user-box login-only">
+          <span class="user-name" id="userName"></span>
+          <button class="btn ghost small" id="btnChangePw" type="button">パスワード変更</button>
+          <button class="btn ghost small" id="btnLogout" type="button">ログアウト</button>
+        </div>
       </div>
     </header>
 
@@ -270,9 +276,81 @@
     </div>
   </dialog>
 
+
+  <!-- ===================== 会員認証（進行役） ===================== -->
+  <div id="authScreen" class="auth-screen" hidden>
+    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <h1 class="auth-title" id="authTitle">会議タイマー</h1>
+      <p class="hint">進行役の方はログインしてください。発表者・参加者は閲覧用 URL を開くだけで使えます（ログイン不要）。</p>
+
+      <div class="tabs auth-tabs" role="tablist">
+        <button type="button" class="tab is-active" data-auth-tab="login" role="tab">ログイン</button>
+        <button type="button" class="tab" data-auth-tab="register" role="tab">新規登録</button>
+        <button type="button" class="tab" data-auth-tab="forgot" role="tab">パスワードを忘れた</button>
+      </div>
+
+      <form id="loginForm" class="auth-pane is-active" data-auth-pane="login" novalidate>
+        <label class="field">メールアドレス<input id="loginEmail" type="email" autocomplete="username" inputmode="email" required></label>
+        <label class="field">パスワード（初回はメールの仮パスワード）
+          <span class="pw-wrap"><input id="loginPassword" type="password" autocomplete="current-password" required><button type="button" class="pw-eye" data-auth-reveal="loginPassword" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
+        </label>
+        <p class="auth-msg" id="authMsg-login" role="alert"></p>
+        <button class="btn primary block" type="submit">ログイン</button>
+        <p class="auth-links"><a href="#" data-goto-tab="forgot">パスワードを忘れた方</a><a href="#" data-goto-tab="register">はじめての方は新規登録</a></p>
+      </form>
+
+      <form id="registerForm" class="auth-pane" data-auth-pane="register" novalidate>
+        <label class="field">ニックネーム（20文字まで。画面に表示されます）<input id="regNickname" type="text" maxlength="20" autocomplete="nickname" required></label>
+        <label class="field">メールアドレス<input id="regEmail" type="email" autocomplete="email" inputmode="email" required></label>
+        <p class="hint">登録すると、このメールアドレスに<b>仮パスワード</b>が届きます（24時間有効）。仮パスワードでログインしたら、ご自身のパスワードに変更してください。</p>
+        <p class="auth-msg" id="authMsg-register" role="alert"></p>
+        <button class="btn primary block" type="submit">登録して仮パスワードを受け取る</button>
+      </form>
+
+      <form id="forgotForm" class="auth-pane" data-auth-pane="forgot" novalidate>
+        <label class="field">登録したメールアドレス<input id="forgotEmail" type="email" autocomplete="email" inputmode="email" required></label>
+        <p class="hint">新しい仮パスワードをメールで送ります。仮パスワードでログインすると、パスワードの変更画面が開きます。届かない場合は迷惑メールフォルダも確認してください。</p>
+        <p class="auth-msg" id="authMsg-forgot" role="alert"></p>
+        <button class="btn primary block" type="submit">仮パスワードを再発行</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===================== パスワード変更 ===================== -->
+  <dialog id="pwDlg" class="dlg">
+    <div class="dlg-head">
+      <h2>パスワードの変更</h2>
+      <button class="btn ghost small" type="button" id="pwDlgClose" aria-label="閉じる">閉じる</button>
+    </div>
+    <p class="notes" id="pwForcedNote" hidden>仮パスワードでログインしています。続けるには、ご自身のパスワードを設定してください。</p>
+    <form id="pwForm" novalidate>
+      <label class="field" id="pwCurrentField">現在のパスワード
+        <span class="pw-wrap"><input id="pwCurrent" type="password" autocomplete="current-password"><button type="button" class="pw-eye" data-auth-reveal="pwCurrent" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
+      </label>
+      <label class="field">新しいパスワード
+        <span class="pw-wrap"><input id="pwNew" type="password" maxlength="64" autocomplete="new-password"><button type="button" class="pw-eye" data-auth-reveal="pwNew" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
+      </label>
+
+      <div class="pw-meter" id="pwMeter" data-level="none" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="pw-meter-label" id="pwMeterLabel" aria-live="polite">強さ：—</div>
+      <ul class="pw-checks" id="pwChecks"></ul>
+
+      <label class="field">新しいパスワード（確認）
+        <span class="pw-wrap"><input id="pwConfirm" type="password" maxlength="64" autocomplete="new-password"><button type="button" class="pw-eye" data-auth-reveal="pwConfirm" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
+      </label>
+      <p class="pw-match" id="pwMatch" aria-live="polite"></p>
+      <p class="auth-msg" id="pwMsg" role="alert"></p>
+      <div class="row between">
+        <button class="btn ghost small" type="button" id="authBtnForcedLogout">ログアウト</button>
+        <button class="btn primary" type="submit" id="pwSubmit" disabled>パスワードを変更</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="config.js"></script>
-  <script src="app.js"></script>
+  <script src="config.js?v=20261008c"></script>
+  <script src="auth.js?v=20261008c"></script>
+  <script src="app.js?v=20261008c"></script>
 </body>
 </html>
