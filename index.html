@@ -178,8 +178,8 @@
       <h2>接続設定</h2>
       <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
     </form>
-    <p class="hint">管理者から受け取った値を入力してください。このブラウザにだけ保存されます。</p>
-    <label class="field">API の URL（GAS ウェブアプリ）<input id="setApi" type="url" placeholder="https://script.google.com/macros/s/…/exec"></label>
+    <p class="hint">管理者から受け取ったトークンを入力してください。このブラウザにだけ保存されます。</p>
+    <label class="field" id="fieldApi">API の URL（GAS ウェブアプリ。config.js で設定していない場合のみ）<input id="setApi" type="url" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="field">ルーム名<input id="setRoom" type="text" maxlength="40" placeholder="default（英数字と - _）"></label>
     <label class="field">アクセストークン
       <span class="row"><input id="setToken" class="grow" type="password" autocomplete="off"><button class="btn ghost small" type="button" id="btnShowToken">表示</button></span>
@@ -244,6 +244,7 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

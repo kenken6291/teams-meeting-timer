@@ -135,6 +135,7 @@ sequenceDiagram
 
 ```
 teams-meeting-timer/
+├─ config.js             接続先の設定（GAS の URL・既定ルーム）
 ├─ index.html            タイマー画面（3モード共通）
 ├─ style.css
 ├─ app.js
@@ -191,7 +192,15 @@ GAS エディタ → プロジェクトの設定 → スクリプト プロパ�
 
 - **GitHub Pages**：リポジトリの Settings → Pages で公開（例 `https://kenken6291.github.io/teams-meeting-timer/`）。
 - **社内に閉じたい場合**：社内 Web サーバー、または GitHub Enterprise の非公開 Pages に置きます。画面のファイル自体には秘密情報は含まれず、トークンは各ブラウザにだけ保存されます。
-- API の URL を全員に入力させたくない場合は、`app.js` 冒頭の `DEFAULT_API_URL` に記入してから公開します。
+- 公開前に `config.js` の `apiUrl` を 4-3 で発行された GAS の URL に書き換えます。利用者は接続設定でトークンを入れるだけになり、オーバーレイ URL にも `api` が含まれなくなります。
+- GAS を「新しいデプロイ」で作り直して URL が変わった場合も、`config.js` を差し替えて push するだけで全員に反映されます。
+
+```js
+window.TIMER_CONFIG = {
+  apiUrl: 'https://script.google.com/macros/s/AKfy…/exec',
+  defaultRoom: 'default',
+};
+```
 
 ### 4-5. セキュリティ設計
 
@@ -327,7 +336,7 @@ GAS エディタ → プロジェクトの設定 → スクリプト プロパ�
 | パラメータ | 値 | 説明 |
 |---|---|---|
 | `mode` | `control` / `view` / `overlay` | 画面の種類 |
-| `api` | GAS の URL | 未指定時は保存値か `DEFAULT_API_URL` |
+| `api` | GAS の URL | `config.js` の `apiUrl` が未設定のときだけ有効 |
 | `room` | 英数字・`-`・`_`（40 文字まで） | 会議ごとの部屋 |
 | `token` | 管理者 / 閲覧トークン | 操作画面では読み取り後にアドレスバーから消去 |
 | `poll` | ミリ秒（1000〜30000） | 同期間隔。既定 2500（オーバーレイは 3000） |
@@ -345,7 +354,7 @@ GAS エディタ → プロジェクトの設定 → スクリプト プロパ�
 | 症状 | 原因と対処 |
 |---|---|
 | 「トークンが正しくありません」 | 接続設定のトークンを確認。`rotateTokens()` を実行した後は全員の設定を更新 |
-| 「API の応答を読めません」 | URL が `/exec` で終わっているか確認。`/dev` は本人しか使えない |
+| 「API の応答を読めません」 | `config.js` の `apiUrl` が `/exec` で終わっているか確認。`/dev` は本人しか使えない。更新後はブラウザのキャッシュを再読み込み（Ctrl+F5） |
 | Teams に届かない | 操作画面下部に失敗理由が表示されます。`testWebhook` を実行し、Workflows の実行履歴と DLP ポリシーを確認 |
 | 通知が 1 分ほど遅れる | 全員がブラウザを閉じていてトリガーだけで判定した場合の仕様です。操作画面を開いておけば数秒で届きます |
 | Drive 解析で「許可されたフォルダの外」 | ファイルを `ALLOWED_FOLDER_ID` 配下に移動 |

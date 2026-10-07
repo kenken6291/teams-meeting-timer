@@ -5,7 +5,8 @@
  *    ?mode=view     閲覧専用の大きな表示
  *    ?mode=overlay  OBS ブラウザソース用の透過オーバーレイ
  *  主な URL パラメータ
- *    api / room / token / poll(ms)
+ *    room / token / poll(ms)
+ *    api … config.js の apiUrl が未設定のときだけ有効
  *    overlay 用: bg(transparent|green|blue|magenta) pos(br|bl|tr|tl|bc|tc)
  *                size(s|m|l|xl) title(0|1) bar(0|1) hideIdle(0|1)
  *  設計メモ
@@ -16,8 +17,14 @@
 (() => {
   'use strict';
 
-  /** GAS ウェブアプリの URL を固定したい場合はここに入れる（空なら設定画面で入力） */
-  const DEFAULT_API_URL = '';
+  /** 接続先は config.js（window.TIMER_CONFIG）で設定する */
+  const APP_CONFIG = window.TIMER_CONFIG || {};
+  const PLACEHOLDER_API = /X{6,}/;
+  const CONFIG_API_URL = (() => {
+    const u = String(APP_CONFIG.apiUrl || '').trim();
+    return u && !PLACEHOLDER_API.test(u) ? u : '';
+  })();
+  const API_FIXED = !!CONFIG_API_URL;
   const LS_KEY = 'teamsTimer.config.v1';
 
   /* ---------- ユーティリティ ---------- */
@@ -44,15 +51,16 @@
 
   const saved = loadSaved();
   const cfg = {
-    api: String(qs.get('api') || saved.api || DEFAULT_API_URL).trim(),
-    room: sanitizeRoom(qs.get('room') || saved.room || 'default'),
+    // config.js に URL があればそれを最優先（URL パラメータや保存値では上書きしない）
+    api: API_FIXED ? CONFIG_API_URL : String(qs.get('api') || saved.api || '').trim(),
+    room: sanitizeRoom(qs.get('room') || saved.room || APP_CONFIG.defaultRoom || 'default'),
     token: String(qs.get('token') || saved.token || '').trim(),
     poll: clamp(Number(qs.get('poll')) || (MODE === 'overlay' ? 3000 : 2500), 1000, 30000),
   };
 
   // 操作・閲覧画面では URL の値を保存し、トークンをアドレスバーから消す（画面共有での漏えい防止）
   if (MODE !== 'overlay' && (qs.has('token') || qs.has('api') || qs.has('room'))) {
-    saveSaved({ api: cfg.api, room: cfg.room, token: cfg.token });
+    saveSaved({ api: API_FIXED ? '' : cfg.api, room: cfg.room, token: cfg.token });
     qs.delete('token');
     qs.delete('api');
     const rest = qs.toString();
@@ -85,7 +93,7 @@
    *  POST は text/plain で送る（CORS のプリフライトを避けるため）
    * ============================================================ */
   async function api(action, payload = {}, { method = 'POST' } = {}) {
-    if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。接続設定から入力してください'), { code: 'no_api' });
+    if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl に GAS ウェブアプリの URL を設定してください'), { code: 'no_api' });
     if (!cfg.token) throw Object.assign(new Error('アクセストークンが未設定です'), { code: 'unauthorized' });
     const body = Object.assign({ action, room: cfg.room, token: cfg.token }, payload);
     const t0 = Date.now();
@@ -548,6 +556,7 @@
   function openSettings(message) {
     const dlg = $('#settingsDlg');
     if (!dlg || dlg.open) return;
+    $('#fieldApi').hidden = API_FIXED;
     $('#setApi').value = cfg.api;
     $('#setRoom').value = cfg.room;
     $('#setToken').value = cfg.token;
@@ -563,10 +572,10 @@
       e.target.textContent = input.type === 'password' ? '表示' : '隠す';
     });
     $('#btnSaveSettings').addEventListener('click', async () => {
-      cfg.api = $('#setApi').value.trim();
+      if (!API_FIXED) cfg.api = $('#setApi').value.trim();
       cfg.room = sanitizeRoom($('#setRoom').value);
       cfg.token = $('#setToken').value.trim();
-      saveSaved({ api: cfg.api, room: cfg.room, token: cfg.token });
+      saveSaved({ api: API_FIXED ? '' : cfg.api, room: cfg.room, token: cfg.token });
       st.state = null;
       st.info = null;
       st.role = null;
@@ -751,7 +760,8 @@
    * ============================================================ */
   function buildUrl(mode, extra = {}) {
     const p = new URLSearchParams({ mode, room: cfg.room });
-    if (cfg.api !== DEFAULT_API_URL || !DEFAULT_API_URL) p.set('api', cfg.api);
+    // config.js で URL を固定している場合は、共有 URL に api を含めない
+    if (!API_FIXED) p.set('api', cfg.api);
     p.set('token', (st.info && st.info.viewerToken) || '');
     Object.entries(extra).forEach(([k, v]) => { if (v !== null && v !== undefined && v !== '') p.set(k, v); });
     return location.origin + location.pathname + '?' + p.toString();
@@ -823,7 +833,7 @@
       if (qs.get('title') === '0') document.body.classList.add('no-title');
       if (qs.get('bar') === '0') document.body.classList.add('no-bar');
       if (qs.get('hideIdle') === '1') document.body.classList.add('hide-idle');
-      if (!cfg.api || !cfg.token) setText('#ovTitle', 'api と token を URL に指定してください');
+      if (!cfg.api || !cfg.token) setText('#ovTitle', cfg.api ? 'URL に token を指定してください' : 'config.js の apiUrl を設定してください');
     } else {
       bindControls();
       bindSettings();
