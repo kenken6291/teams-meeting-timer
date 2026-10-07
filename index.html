@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>会議タイマー</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-level="idle" data-status="idle">
+
+  <!-- ===================== 通常モード（操作・表示） ===================== -->
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-title" id="meetingTitle">会議タイマー</div>
+        <div class="brand-sub">
+          <span>ルーム <b id="roomName">default</b></span>
+          <span id="roleLabel" class="role">未接続</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="conn" id="conn" title="サーバーとの接続状態"><i></i><span id="connText">接続しています</span></span>
+        <span class="badge admin-only" id="webhookBadge" hidden></span>
+        <button class="btn ghost" id="btnSound" type="button" title="しきい値で音を鳴らす">音 オン</button>
+        <button class="btn ghost admin-only" id="btnShare" type="button">オーバーレイ・共有URL</button>
+        <button class="btn ghost" id="btnFullscreen" type="button" title="全画面表示">全画面</button>
+        <button class="btn ghost" id="btnSettings" type="button">接続設定</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage" aria-live="off">
+        <div class="stage-head">
+          <span id="itemIndex" class="chip">—</span>
+          <span id="statusLabel" class="chip status">待機中</span>
+        </div>
+        <h1 class="item-title" id="itemTitle">アジェンダを取り込むか、時間を設定してください</h1>
+        <div class="item-presenter" id="itemPresenter"></div>
+
+        <div class="clock" id="clock" role="timer" aria-label="残り時間">--:--</div>
+
+        <div class="gauge" aria-hidden="true">
+          <div class="gauge-fill" id="barFill"></div>
+          <span class="gauge-mark" id="markWarn"><em>5分</em></span>
+          <span class="gauge-mark" id="markDanger"><em>1分</em></span>
+        </div>
+
+        <dl class="stats">
+          <div><dt>持ち時間</dt><dd id="allotted">—</dd></div>
+          <div><dt>この議題の終了予定</dt><dd id="endsAt">—</dd></div>
+          <div><dt>会議の終了予定</dt><dd id="meetingEnd">—</dd></div>
+          <div class="wide"><dt>次の議題</dt><dd id="nextTitle">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel controls admin-only" aria-label="タイマー操作">
+        <div class="ctrl-main">
+          <button class="btn" type="button" data-act="prev">前の議題</button>
+          <button class="btn primary big" type="button" id="btnToggle" data-act="toggle">開始</button>
+          <button class="btn" type="button" data-act="next">次の議題</button>
+          <button class="btn subtle-danger" type="button" data-act="reset">リセット</button>
+        </div>
+
+        <div class="ctrl-adjust" role="group" aria-label="時間の調整">
+          <button class="btn adj minus" type="button" data-act="adjust" data-sec="-300">−5分</button>
+          <button class="btn adj minus" type="button" data-act="adjust" data-sec="-60">−1分</button>
+          <button class="btn adj minus" type="button" data-act="adjust" data-sec="-30">−30秒</button>
+          <button class="btn adj plus" type="button" data-act="adjust" data-sec="30">+30秒</button>
+          <button class="btn adj plus" type="button" data-act="adjust" data-sec="60">+1分</button>
+          <button class="btn adj plus" type="button" data-act="adjust" data-sec="300">+5分</button>
+        </div>
+
+        <div class="ctrl-row">
+          <label class="field-inline">アジェンダ外で
+            <input id="quickMin" type="number" min="0.5" max="600" step="0.5" value="10" inputmode="decimal"> 分
+          </label>
+          <input id="quickTitle" class="grow" type="text" maxlength="50" placeholder="タイトル（例：質疑応答）">
+          <button class="btn" type="button" id="btnQuickSet">この時間で設定</button>
+        </div>
+
+        <div class="ctrl-row notify">
+          <label class="switch"><input type="checkbox" id="optNotify"><span>Teams に通知</span></label>
+          <div class="thr-chips" id="thrChips">
+            <label><input type="checkbox" value="600"><span>10分前</span></label>
+            <label><input type="checkbox" value="300"><span>5分前</span></label>
+            <label><input type="checkbox" value="180"><span>3分前</span></label>
+            <label><input type="checkbox" value="60"><span>1分前</span></label>
+            <label><input type="checkbox" value="0"><span>終了時</span></label>
+          </div>
+          <button class="btn ghost small" type="button" id="btnTestNotify">テスト通知を送る</button>
+        </div>
+        <p class="notice" id="lastNotice"></p>
+        <p class="hint">キー操作：Space 開始／一時停止、← → 前後の議題、+ − 1分調整</p>
+      </section>
+
+      <aside class="panel agenda" aria-label="アジェンダ">
+        <div class="panel-head">
+          <h2>アジェンダ</h2>
+          <div class="panel-actions admin-only">
+            <button class="btn small ghost" type="button" id="btnEditAgenda">編集</button>
+            <button class="btn small primary" type="button" id="btnImport">資料から取り込む</button>
+          </div>
+        </div>
+        <ol id="agendaList" class="agenda-list"></ol>
+        <div class="agenda-foot" id="agendaFoot"></div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- ===================== 透過オーバーレイモード ===================== -->
+  <div id="overlay" class="ov" aria-hidden="true">
+    <div class="ov-card" id="ovCard">
+      <div class="ov-head"><span class="ov-dot" id="ovDot"></span><span class="ov-title" id="ovTitle"></span></div>
+      <div class="ov-time" id="ovTime">--:--</div>
+      <div class="ov-bar"><i id="ovBar"></i></div>
+    </div>
+  </div>
+
+  <!-- ===================== アジェンダ取込・編集 ===================== -->
+  <dialog id="importDlg" class="dlg wide">
+    <form method="dialog" class="dlg-head">
+      <h2>アジェンダの取り込みと編集</h2>
+      <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
+    </form>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab is-active" data-tab="drive" role="tab">Google ドライブの資料</button>
+      <button type="button" class="tab" data-tab="text" role="tab">テキストを貼り付け</button>
+      <button type="button" class="tab" data-tab="manual" role="tab">手で入力</button>
+    </div>
+
+    <div class="tab-pane is-active" data-pane="drive">
+      <p class="hint">Google ドキュメント、スライド、スプレッドシート、PDF、テキストを読み込めます。共有 URL かファイル ID を入れてください。</p>
+      <div class="row">
+        <input id="driveRef" class="grow" type="text" placeholder="https://docs.google.com/presentation/d/…">
+        <button class="btn primary" type="button" id="btnParseDrive">Gemini で解析</button>
+      </div>
+      <button class="btn ghost small" type="button" id="btnListFiles">会議資料フォルダから選ぶ</button>
+      <ul id="fileList" class="file-list"></ul>
+    </div>
+
+    <div class="tab-pane" data-pane="text">
+      <p class="hint">招集メールやアジェンダの文章をそのまま貼り付けてください。</p>
+      <textarea id="pasteText" rows="7" placeholder="例）10:00-10:05 開会&#10;10:05-10:25 売上報告（佐藤）&#10;新製品の検討 25分"></textarea>
+      <div class="row end"><button class="btn primary" type="button" id="btnParseText">Gemini で解析</button></div>
+    </div>
+
+    <div class="tab-pane" data-pane="manual">
+      <p class="hint">下の表に議題と持ち時間を直接入力できます。</p>
+    </div>
+
+    <div class="loading" id="importLoading" hidden><span class="spinner"></span><span>Gemini が資料を読んでいます（10〜30秒）</span></div>
+
+    <div class="draft">
+      <div class="row">
+        <label class="field grow">会議名<input id="draftTitle" type="text" maxlength="60" placeholder="例：営業部 週次定例"></label>
+        <div class="draft-total" id="draftTotal"></div>
+      </div>
+      <p class="notes" id="parseNotes" hidden></p>
+      <div class="table-wrap">
+        <table class="draft-table">
+          <thead><tr><th>順</th><th>議題</th><th>分</th><th>発表者</th><th><span class="sr">操作</span></th></tr></thead>
+          <tbody id="draftBody"></tbody>
+        </table>
+      </div>
+      <div class="row between">
+        <button class="btn ghost" type="button" id="btnAddRow">行を追加</button>
+        <button class="btn primary" type="button" id="btnApplyAgenda">このアジェンダで始める</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ===================== 接続設定 ===================== -->
+  <dialog id="settingsDlg" class="dlg">
+    <form method="dialog" class="dlg-head">
+      <h2>接続設定</h2>
+      <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
+    </form>
+    <p class="hint">管理者から受け取った値を入力してください。このブラウザにだけ保存されます。</p>
+    <label class="field">API の URL（GAS ウェブアプリ）<input id="setApi" type="url" placeholder="https://script.google.com/macros/s/…/exec"></label>
+    <label class="field">ルーム名<input id="setRoom" type="text" maxlength="40" placeholder="default（英数字と - _）"></label>
+    <label class="field">アクセストークン
+      <span class="row"><input id="setToken" class="grow" type="password" autocomplete="off"><button class="btn ghost small" type="button" id="btnShowToken">表示</button></span>
+    </label>
+    <div class="row between">
+      <span class="hint" id="setResult"></span>
+      <button class="btn primary" type="button" id="btnSaveSettings">保存して接続</button>
+    </div>
+  </dialog>
+
+  <!-- ===================== オーバーレイ・共有URL ===================== -->
+  <dialog id="shareDlg" class="dlg wide">
+    <form method="dialog" class="dlg-head">
+      <h2>オーバーレイと共有用 URL</h2>
+      <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
+    </form>
+    <div class="share-grid">
+      <div class="share-form">
+        <label class="field">背景
+          <select id="ovBg">
+            <option value="transparent">透過（OBS ブラウザソース推奨）</option>
+            <option value="green">グリーンバック</option>
+            <option value="blue">ブルーバック</option>
+            <option value="magenta">マゼンタ</option>
+          </select>
+        </label>
+        <label class="field">位置
+          <select id="ovPos">
+            <option value="br">右下</option>
+            <option value="bl">左下</option>
+            <option value="tr">右上</option>
+            <option value="tl">左上</option>
+            <option value="bc">下中央</option>
+            <option value="tc">上中央</option>
+          </select>
+        </label>
+        <label class="field">大きさ
+          <select id="ovSize">
+            <option value="s">小</option>
+            <option value="m" selected>中</option>
+            <option value="l">大（画面共有中のサムネイル向け）</option>
+            <option value="xl">特大</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="ovShowTitle" checked> 議題名を表示</label>
+        <label class="check"><input type="checkbox" id="ovShowBar" checked> 残り時間バーを表示</label>
+        <label class="check"><input type="checkbox" id="ovHideIdle"> 待機中は隠す</label>
+      </div>
+      <div class="share-preview">
+        <div class="preview-frame" id="previewFrame"><iframe id="ovPreview" title="オーバーレイのプレビュー" loading="lazy"></iframe></div>
+        <p class="hint">市松模様の部分が透過されます。グリーンバックはクロマキーで抜いてください。</p>
+      </div>
+    </div>
+    <label class="field">オーバーレイ URL（OBS のブラウザソースに貼る）
+      <span class="row"><input id="ovUrl" class="grow" type="text" readonly><button class="btn small" type="button" data-copy="ovUrl">コピー</button></span>
+    </label>
+    <label class="field">閲覧専用 URL（操作できない大きな表示）
+      <span class="row"><input id="viewUrl" class="grow" type="text" readonly><button class="btn small" type="button" data-copy="viewUrl">コピー</button></span>
+    </label>
+    <p class="hint">どちらも閲覧用トークン入りです。社外に共有しないでください。</p>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
