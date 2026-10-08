@@ -458,6 +458,7 @@ body.is-admin .agenda-list li:hover { background: #2a3750; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { background: var(--danger); color: #fff; }
+.btn.copied { border-color: var(--ok); color: var(--ok); }
 
 /* ---------- しきい値通過時の一瞬の強調 ---------- */
 

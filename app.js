@@ -1288,18 +1288,9 @@
 
     // Copilot の表
     setText('#copilotPrompt', COPILOT_PROMPT);
-    $('#btnCopyPrompt').addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(COPILOT_PROMPT);
-      } catch {
-        const ta = document.createElement('textarea');
-        ta.value = COPILOT_PROMPT;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-      }
-      toast('指示文をコピーしました。Copilot に貼り付けて、会議資料と一緒に送ってください');
+    $('#btnCopyPrompt').addEventListener('click', async (e) => {
+      const ok = await copyText(COPILOT_PROMPT, e.currentTarget);
+      if (ok) toast('指示文をコピーしました。Copilot に貼り付けて、会議資料と一緒に送ってください');
     });
     /** 何を受け取ったかを表示（読み取れなかったときの手がかり） */
     const describe = (text, html) => {
@@ -1505,24 +1496,64 @@
       }
     });
     $$('[data-copy]').forEach((b) => {
-      b.addEventListener('click', async () => {
+      b.addEventListener('click', () => {
         const input = $('#' + b.dataset.copy);
-        try {
-          await navigator.clipboard.writeText(input.value);
-        } catch {
-          input.select();
-          document.execCommand('copy');
-        }
-        toast('コピーしました');
+        copyText(input.value, b, input);
       });
     });
   }
 
-  /* ---------- トースト ---------- */
+  /* ---------- コピー ----------
+   * 1) Clipboard API → 2) execCommand（開いているダイアログの中に一時的な欄を作る）
+   *    → 3) どちらも駄目なら欄を選択して Ctrl+C を案内
+   * ※ モーダルダイアログ表示中は、ダイアログの外の要素は選択もコピーもできないため、
+   *    一時的な欄は必ずダイアログの中に作る */
+  async function copyText(text, button, sourceInput) {
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch { ok = false; }
+
+    if (!ok) {
+      const host = (button && button.closest('dialog')) || document.body;
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+      host.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { ok = document.execCommand('copy'); } catch { ok = false; }
+      ta.remove();
+    }
+
+    if (button) {
+      const label = button.dataset.label || button.textContent;
+      button.dataset.label = label;
+      button.textContent = ok ? 'コピーしました ✓' : 'Ctrl+C でコピー';
+      button.classList.toggle('copied', ok);
+      clearTimeout(button._copyTimer);
+      button._copyTimer = setTimeout(() => { button.textContent = label; button.classList.remove('copied'); }, 2000);
+    }
+    if (!ok) {
+      if (sourceInput) { sourceInput.focus(); sourceInput.select(); }
+      toast('自動でコピーできませんでした。選択された部分を Ctrl+C でコピーしてください', true);
+    }
+    return ok;
+  }
+
+  /* ---------- トースト ----------
+   * モーダルダイアログ表示中はダイアログが最前面になるため、トーストをダイアログの中に移して表示する */
   let toastTimer = null;
   function toast(msg, isError = false) {
     const el = $('#toast');
     if (!el) return;
+    const open = Array.from(document.querySelectorAll('dialog[open]')).pop();
+    const host = open || document.body;
+    if (el.parentElement !== host) host.appendChild(el);
     el.textContent = msg;
     el.classList.toggle('error', !!isError);
     el.classList.add('show');
