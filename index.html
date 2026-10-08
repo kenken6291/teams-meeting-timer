@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>会議タイマー</title>
   <!-- 更新時は ?v= の値を変えると、ブラウザの古いキャッシュを使わずに読み込まれる -->
-  <link rel="stylesheet" href="style.css?v=20261009b">
+  <link rel="stylesheet" href="style.css?v=20261009c">
 </head>
 <body data-level="idle" data-status="idle">
 
@@ -131,15 +131,36 @@
       <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
     </form>
 
-    <p class="privacy-note">画像・文章の読み取りは<b>この PC のブラウザの中だけ</b>で行い、外部には送信しません。議題名・発表者名もこの PC にだけ保存し、サーバーには<b>持ち時間（分）の数字だけ</b>を送ります（サーバーに保存するのは進行役の会員情報と数字だけです）。</p>
+    <p class="privacy-note">貼り付けた表・画像・文章の読み取りは<b>この PC のブラウザの中だけ</b>で行い、外部には送信しません。議題名・発表者名もこの PC にだけ保存し、サーバーには<b>持ち時間（分）の数字だけ</b>を送ります（サーバーに保存するのは進行役の会員情報と数字だけです）。</p>
 
     <div class="tabs" role="tablist">
-      <button type="button" class="tab is-active" data-tab="image" role="tab">画像から読み取る</button>
+      <button type="button" class="tab is-active" data-tab="copilot" role="tab">Copilot の表を貼り付け（おすすめ）</button>
       <button type="button" class="tab" data-tab="text" role="tab">文章から読み取る</button>
       <button type="button" class="tab" data-tab="manual" role="tab">手で入力</button>
+      <button type="button" class="tab" data-tab="image" role="tab">画像（簡易）</button>
     </div>
 
-    <div class="tab-pane is-active" data-pane="image">
+    <div class="tab-pane is-active" data-pane="copilot">
+      <ol class="steps">
+        <li><b>社内の Copilot</b>（Microsoft 365 Copilot など）を開き、会議資料・招集メール・スクリーンショットを渡します。</li>
+        <li>下の「指示文をコピー」を押して、Copilot に貼り付けて送ります。</li>
+        <li>Copilot が出した<b>表をコピー</b>して、下の欄に貼り付けます（貼り付けると自動で読み取ります）。</li>
+      </ol>
+      <div class="prompt-box">
+        <pre id="copilotPrompt"></pre>
+        <button class="btn small" type="button" id="btnCopyPrompt">指示文をコピー</button>
+      </div>
+      <label class="field">Copilot の表をここに貼り付け
+        <textarea id="tablePaste" rows="6" placeholder="| 順 | 議題 | 分 | 発表者 |&#10;|---|---|---|---|&#10;| 1 | 開会 | 5 | 司会 |&#10;| 2 | 売上報告 | 20 | 佐藤 |"></textarea>
+      </label>
+      <div class="row between">
+        <span class="hint">Copilot・Excel・Word・Teams の表、Markdown の表、タブ区切りに対応しています。</span>
+        <button class="btn primary" type="button" id="btnParseTable">表を読み取る</button>
+      </div>
+    </div>
+
+    <div class="tab-pane" data-pane="image">
+      <p class="notes">ブラウザ内の簡易な文字認識のため、精度は高くありません。画像は社内の Copilot に貼り付けて表にしてもらう方法（左端のタブ）をおすすめします。</p>
       <p class="hint">アジェンダのスクリーンショットや写真を、Ctrl+V で貼り付けるか、ドラッグ＆ドロップ、または「画像を選ぶ」で追加してください（3枚まで）。画像は読み取りが終わるか、この画面を閉じると消去されます。</p>
       <div class="dropzone" id="imgDrop" tabindex="0" role="button" aria-label="画像を貼り付けまたはドロップ">
         <div class="dropzone-main">
@@ -368,8 +389,8 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="config.js?v=20261009b"></script>
-  <script src="auth.js?v=20261009b"></script>
-  <script src="app.js?v=20261009b"></script>
+  <script src="config.js?v=20261009c"></script>
+  <script src="auth.js?v=20261009c"></script>
+  <script src="app.js?v=20261009c"></script>
 </body>
 </html>

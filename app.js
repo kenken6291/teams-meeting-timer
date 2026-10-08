@@ -905,6 +905,142 @@
     return { meetingTitle, agenda: items.slice(0, 50), notes: notes.join(' ') };
   }
 
+  /* ---------- Copilot などの表を読み取る（ブラウザ内） ---------- */
+
+  /** 社内 Copilot に渡す指示文 */
+  const COPILOT_PROMPT = [
+    '次の会議資料（貼り付けた文章・画像・ファイル）から、会議のアジェンダを表にしてください。',
+    '',
+    '・列は「順」「議題」「分」「発表者」の4つだけにする',
+    '・「分」は各議題の持ち時間を半角数字だけで書く（例：15）',
+    '・「10:00-10:15」のように時刻で書かれている場合は、差を分で計算する',
+    '・開始時刻だけが並んでいる場合は、次の議題の開始時刻との差を分にする',
+    '・持ち時間が書かれていない議題は、会議全体の時間から推定し、数字の後ろに「?」を付ける（例：10?）',
+    '・休憩・質疑応答も時間があれば1行にする。会議の終了時刻の行は入れない',
+    '・議題は40文字以内に要約する。発表者が分からなければ空欄',
+    '・表以外の説明は書かない',
+  ].join('\n');
+
+  /** HTML の表（Copilot・Excel・Word・Teams からコピーしたもの）を行×列の配列に */
+  function rowsFromHtml(html) {
+    if (!html || !/<table/i.test(html)) return null;
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const table = doc.querySelector('table');
+    if (!table) return null;
+    return Array.from(table.querySelectorAll('tr'))
+      .map((tr) => Array.from(tr.querySelectorAll('th,td')).map((c) => c.textContent.replace(/\s+/g, ' ').trim()))
+      .filter((r) => r.some(Boolean));
+  }
+
+  /** 文字の表（Markdown の | 区切り・タブ区切り・カンマ区切り）を行×列の配列に */
+  function rowsFromText(text) {
+    const lines = String(text || '').normalize('NFKC').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return null;
+    const pipeLines = lines.filter((l) => (l.match(/\|/g) || []).length >= 2);
+    if (pipeLines.length >= 2) {
+      return pipeLines
+        .filter((l) => !/^\|?\s*:?-{2,}/.test(l))           // 区切り行 |---|---|
+        .map((l) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()));
+    }
+    if (lines.filter((l) => l.includes('\t')).length >= 2) return lines.map((l) => l.split('\t').map((c) => c.trim()));
+    if (lines.filter((l) => l.includes(',')).length >= 2) return lines.map((l) => l.split(',').map((c) => c.trim()));
+    return null;
+  }
+
+  /** 「15」「15分」「約15分」「15?」「0:15」「10:00-10:15」「1時間」などを分に */
+  function minutesFromCell(cell) {
+    const c = String(cell || '').normalize('NFKC').trim();
+    if (!c) return { minutes: null, estimated: false };
+    const estimated = /[?？]|約|推定|目安|程度|くらい/.test(c);
+    const range = c.match(/(\d{1,2})\s*[:時]\s*(\d{1,2})?\s*分?\s*(?:-|~|〜|～|ー|―|−|–|—|から)\s*(\d{1,2})\s*[:時]\s*(\d{1,2})?/);
+    if (range) {
+      let d = (Number(range[3]) * 60 + Number(range[4] || 0)) - (Number(range[1]) * 60 + Number(range[2] || 0));
+      if (d < 0) d += 12 * 60;
+      return { minutes: d, estimated };
+    }
+    const hm = c.match(/^(\d{1,2}):(\d{2})$/);
+    if (hm) return { minutes: Number(hm[1]) * 60 + Number(hm[2]), estimated };
+    const h = c.match(/(\d+(?:\.\d+)?)\s*(?:時間|h(?:ours?|rs?)?\b)/i);
+    const m = c.match(/(\d+(?:\.\d+)?)\s*(?:分|min(?:utes?|s)?\b)/i);
+    let total = 0;
+    if (h || m) {
+      total = (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
+    } else {
+      const n = c.match(/(\d+(?:\.\d+)?)/);   // 「15」「15?」など数字だけ
+      total = n ? Number(n[1]) : 0;
+    }
+    return { minutes: total > 0 ? total : null, estimated };
+  }
+
+  /** 行×列の配列からアジェンダを作る。見出しの言葉で列を判定し、無ければ中身から推測する */
+  function agendaFromRows(rows) {
+    if (!rows || !rows.length) return null;
+    const KEYS = {
+      title: /議題|項目|内容|タイトル|テーマ|件名|アジェンダ|agenda|title|topic|item/i,
+      minutes: /^分$|分数|時間|所要|持ち時間|予定時間|min|duration|time/i,
+      presenter: /発表|担当|報告者|説明者|presenter|owner|speaker|講師|司会/i,
+      no: /^(順|no\.?|#|番号|項番)$/i,
+    };
+    const head = rows[0].map((c) => String(c || '').normalize('NFKC').trim());
+    const col = { title: -1, minutes: -1, presenter: -1 };
+    head.forEach((h, i) => {
+      if (KEYS.no.test(h)) return;
+      if (col.presenter < 0 && KEYS.presenter.test(h)) col.presenter = i;
+      else if (col.title < 0 && KEYS.title.test(h)) col.title = i;
+      else if (col.minutes < 0 && KEYS.minutes.test(h)) col.minutes = i;
+    });
+    const hasHeader = col.title >= 0 || col.minutes >= 0;
+    const body = hasHeader ? rows.slice(1) : rows;
+
+    if (!hasHeader || col.title < 0 || col.minutes < 0) {
+      // 見出しが無い・足りない場合：数字が多い列＝分、文字が長い列＝議題、残りの短い列＝発表者
+      const width = Math.max(...body.map((r) => r.length));
+      const stats = Array.from({ length: width }, (_, i) => {
+        const cells = body.map((r) => String(r[i] || '').trim());
+        const filled = cells.filter(Boolean);
+        return {
+          i,
+          numeric: filled.filter((c) => minutesFromCell(c).minutes !== null && c.replace(/[\d\s:時間分min?？約〜~\-.]/gi, '').length === 0).length / Math.max(1, filled.length),
+          seqNo: filled.every((c, k) => Number(c.replace(/[.)、．]/g, '')) === k + 1),
+          len: filled.reduce((a, c) => a + c.length, 0) / Math.max(1, filled.length),
+        };
+      });
+      const cand = stats.filter((x) => !x.seqNo);
+      if (col.minutes < 0) col.minutes = (cand.filter((x) => x.numeric >= 0.6).sort((a, b) => b.numeric - a.numeric)[0] || {}).i ?? -1;
+      if (col.title < 0) col.title = (cand.filter((x) => x.i !== col.minutes).sort((a, b) => b.len - a.len)[0] || {}).i ?? -1;
+      if (col.presenter < 0) col.presenter = (cand.filter((x) => x.i !== col.minutes && x.i !== col.title)[0] || {}).i ?? -1;
+    }
+    if (col.title < 0) return null;
+
+    const items = [];
+    let estimatedCount = 0;
+    body.forEach((r) => {
+      const title = String(r[col.title] || '').replace(/^\d{1,2}\s*[.)、．]\s*/, '').trim();
+      if (!title || /^(合計|計|小計|total)$/i.test(title)) return;
+      const mm = col.minutes >= 0 ? minutesFromCell(r[col.minutes]) : { minutes: null, estimated: false };
+      let minutes = mm.minutes;
+      let estimated = mm.estimated;
+      if (!(minutes > 0)) { minutes = 5; estimated = true; }
+      if (estimated) estimatedCount++;
+      items.push({
+        title: title.slice(0, 50),
+        minutes: clamp(Math.round(minutes * 2) / 2, 0.5, 600),
+        presenter: col.presenter >= 0 ? String(r[col.presenter] || '').replace(/(さん|様|氏)$/, '').trim().slice(0, 20) : '',
+        estimated,
+      });
+    });
+    if (!items.length) return null;
+    return {
+      meetingTitle: '',
+      agenda: items.slice(0, 50),
+      notes: estimatedCount ? `推定の持ち時間（「?」付き、または空欄）が ${estimatedCount} 件あります（黄色の枠）。確認してください。` : '',
+    };
+  }
+
+  function parseAgendaTable(text, html) {
+    return agendaFromRows(rowsFromHtml(html)) || agendaFromRows(rowsFromText(text)) || null;
+  }
+
   /* ---------- 画像の文字認識（ブラウザ内で実行） ---------- */
   let tesseractLoading = null;
   function loadTesseract() {
@@ -1122,6 +1258,50 @@
       }
     });
 
+    // Copilot の表
+    setText('#copilotPrompt', COPILOT_PROMPT);
+    $('#btnCopyPrompt').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(COPILOT_PROMPT);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = COPILOT_PROMPT;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      toast('指示文をコピーしました。Copilot に貼り付けて、会議資料と一緒に送ってください');
+    });
+    const runTable = (text, html) => {
+      const r = parseAgendaTable(text, html);
+      if (!r) {
+        toast('表として読み取れませんでした。Copilot の表全体（見出し行を含む）をコピーして貼り付けてください', true);
+        return;
+      }
+      applyParsed(r);
+      $('#tablePaste').value = '';
+    };
+    $('#tablePaste').addEventListener('paste', (e) => {
+      const html = e.clipboardData && e.clipboardData.getData('text/html');
+      const text = e.clipboardData && e.clipboardData.getData('text/plain');
+      if (html && /<table/i.test(html)) {
+        e.preventDefault();
+        runTable(text, html);
+        return;
+      }
+      // 文字の表はいったん欄に入れてから読み取る
+      setTimeout(() => {
+        const v = $('#tablePaste').value;
+        if (rowsFromText(v)) runTable(v, '');
+      }, 0);
+    });
+    $('#btnParseTable').addEventListener('click', () => {
+      const v = $('#tablePaste').value.trim();
+      if (!v) { toast('Copilot の表を貼り付けてください', true); return; }
+      runTable(v, '');
+    });
+
     // テキスト
     $('#btnParseText').addEventListener('click', () => {
       const text = $('#pasteText').value.trim();
@@ -1133,10 +1313,26 @@
     // どこで Ctrl+V しても画像なら取り込む
     document.addEventListener('paste', (e) => {
       if (st.role !== 'admin' || MODE !== 'control' || document.body.classList.contains('auth-open')) return;
-      const files = clipboardImages(e);
-      if (!files.length) return;
+      if (e.target.closest && e.target.closest('input, textarea')) return;   // 入力欄への貼り付けはそのまま
       const dlg = $('#importDlg');
       if (Array.from(document.querySelectorAll('dialog[open]')).some((d) => d !== dlg)) return;
+
+      // 表（Copilot・Excel など）を貼り付けた場合は、そのまま読み取る
+      const html = e.clipboardData && e.clipboardData.getData('text/html');
+      const text = e.clipboardData && e.clipboardData.getData('text/plain');
+      if ((html && /<table/i.test(html)) || (text && rowsFromText(text))) {
+        const r = parseAgendaTable(text, html);
+        if (r) {
+          e.preventDefault();
+          if (!dlg.open) openImport(false);
+          switchImportTab('copilot');
+          applyParsed(r);
+          return;
+        }
+      }
+
+      const files = clipboardImages(e);
+      if (!files.length) return;
       e.preventDefault();
       if (!dlg.open) openImport(false);
       switchImportTab('image');
@@ -1328,7 +1524,7 @@
   }
 
   // 動作確認用（ブラウザ内の読み取り関数）
-  window.TimerParse = { parseAgendaText };
+  window.TimerParse = { parseAgendaText, parseAgendaTable };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
