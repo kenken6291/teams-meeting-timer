@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>会議タイマー</title>
   <!-- 更新時は ?v= の値を変えると、ブラウザの古いキャッシュを使わずに読み込まれる -->
-  <link rel="stylesheet" href="style.css?v=20261009c">
+  <link rel="stylesheet" href="style.css?v=20261009d">
 </head>
 <body data-level="idle" data-status="idle">
 
@@ -144,18 +144,22 @@
       <ol class="steps">
         <li><b>社内の Copilot</b>（Microsoft 365 Copilot など）を開き、会議資料・招集メール・スクリーンショットを渡します。</li>
         <li>下の「指示文をコピー」を押して、Copilot に貼り付けて送ります。</li>
-        <li>Copilot が出した<b>表をコピー</b>して、下の欄に貼り付けます（貼り付けると自動で読み取ります）。</li>
+        <li>Copilot の回答の<b>コードブロック右上の「コピー」ボタン</b>を押し、下の欄に Ctrl+V で貼り付けます（自動で読み取ります）。</li>
       </ol>
       <div class="prompt-box">
         <pre id="copilotPrompt"></pre>
         <button class="btn small" type="button" id="btnCopyPrompt">指示文をコピー</button>
       </div>
-      <label class="field">Copilot の表をここに貼り付け
-        <textarea id="tablePaste" rows="6" placeholder="| 順 | 議題 | 分 | 発表者 |&#10;|---|---|---|---|&#10;| 1 | 開会 | 5 | 司会 |&#10;| 2 | 売上報告 | 20 | 佐藤 |"></textarea>
+      <label class="field">Copilot の回答をここに貼り付け
+        <textarea id="tablePaste" rows="6" placeholder="順|議題|分|発表者&#10;1|開会|5|司会&#10;2|売上報告|20|佐藤"></textarea>
       </label>
+      <p class="notes" id="tableDiag" hidden></p>
       <div class="row between">
-        <span class="hint">Copilot・Excel・Word・Teams の表、Markdown の表、タブ区切りに対応しています。</span>
-        <button class="btn primary" type="button" id="btnParseTable">表を読み取る</button>
+        <span class="hint">「|」区切り・Copilot や Excel の表・タブ区切りに対応しています。</span>
+        <span class="row">
+          <button class="btn ghost" type="button" id="btnReadClipboard">クリップボードから読み込む</button>
+          <button class="btn primary" type="button" id="btnParseTable">読み取る</button>
+        </span>
       </div>
     </div>
 
@@ -389,8 +393,8 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="config.js?v=20261009c"></script>
-  <script src="auth.js?v=20261009c"></script>
-  <script src="app.js?v=20261009c"></script>
+  <script src="config.js?v=20261009d"></script>
+  <script src="auth.js?v=20261009d"></script>
+  <script src="app.js?v=20261009d"></script>
 </body>
 </html>

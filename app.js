@@ -909,16 +909,23 @@
 
   /** 社内 Copilot に渡す指示文 */
   const COPILOT_PROMPT = [
-    '次の会議資料（貼り付けた文章・画像・ファイル）から、会議のアジェンダを表にしてください。',
+    '次の会議資料（貼り付けた文章・画像・ファイル）から、会議のアジェンダを作ってください。',
+    '出力は、下の形式の「コードブロック」1つだけにしてください（表や説明文は不要です）。',
     '',
-    '・列は「順」「議題」「分」「発表者」の4つだけにする',
-    '・「分」は各議題の持ち時間を半角数字だけで書く（例：15）',
-    '・「10:00-10:15」のように時刻で書かれている場合は、差を分で計算する',
-    '・開始時刻だけが並んでいる場合は、次の議題の開始時刻との差を分にする',
-    '・持ち時間が書かれていない議題は、会議全体の時間から推定し、数字の後ろに「?」を付ける（例：10?）',
-    '・休憩・質疑応答も時間があれば1行にする。会議の終了時刻の行は入れない',
-    '・議題は40文字以内に要約する。発表者が分からなければ空欄',
-    '・表以外の説明は書かない',
+    '```',
+    '順|議題|分|発表者',
+    '1|開会|5|司会',
+    '2|売上報告|20|佐藤',
+    '```',
+    '',
+    'ルール',
+    '・1行目は必ず「順|議題|分|発表者」',
+    '・「分」は持ち時間を半角数字だけで書く（例：15）',
+    '・「10:00-10:15」のような時刻は差を分で計算する。開始時刻だけなら次の議題との差にする',
+    '・持ち時間が書かれていない議題は推定し、数字の後ろに「?」を付ける（例：10?）',
+    '・発表者が分からなければ「-」と書く',
+    '・議題は40文字以内に要約し、「|」は使わない',
+    '・休憩・質疑応答も時間があれば1行にする。会議の終了時刻だけの行は入れない',
   ].join('\n');
 
   /** HTML の表（Copilot・Excel・Word・Teams からコピーしたもの）を行×列の配列に */
@@ -934,16 +941,37 @@
 
   /** 文字の表（Markdown の | 区切り・タブ区切り・カンマ区切り）を行×列の配列に */
   function rowsFromText(text) {
-    const lines = String(text || '').normalize('NFKC').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const lines = String(text || '').normalize('NFKC').replace(/\r/g, '').replace(/\u00a0/g, ' ')
+      .split('\n').map((l) => l.trim())
+      .filter((l) => l && !/^```/.test(l));                    // コードブロックの ``` 行は無視
     if (!lines.length) return null;
-    const pipeLines = lines.filter((l) => (l.match(/\|/g) || []).length >= 2);
+
+    // 1) | 区切り（Markdown の表・Copilot のコードブロック）
+    const pipeLines = lines.filter((l) => l.includes('|'));
     if (pipeLines.length >= 2) {
-      return pipeLines
-        .filter((l) => !/^\|?\s*:?-{2,}/.test(l))           // 区切り行 |---|---|
+      const rows = pipeLines
+        .filter((l) => !/^\|?\s*:?-{2,}/.test(l))             // 区切り行 |---|---|
         .map((l) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()));
+      if (rows.length >= 1 && rows.some((r) => r.length >= 2)) return rows;
     }
-    if (lines.filter((l) => l.includes('\t')).length >= 2) return lines.map((l) => l.split('\t').map((c) => c.trim()));
-    if (lines.filter((l) => l.includes(',')).length >= 2) return lines.map((l) => l.split(',').map((c) => c.trim()));
+    // 2) タブ区切り（Excel・Teams・ブラウザの表をコピーしたとき）
+    const tabLines = lines.filter((l) => l.includes('\t'));
+    if (tabLines.length >= 2) return tabLines.map((l) => l.split('\t').map((c) => c.trim()));
+    // 3) 1 マス 1 行（ブラウザによっては表がこの形でコピーされる）
+    const HEAD = /^(順|no\.?|#|番号|議題|項目|内容|タイトル|テーマ|分|時間|所要時間|持ち時間|発表者|担当|担当者|報告者)$/i;
+    let k = 0;
+    while (k < lines.length && HEAD.test(lines[k])) k++;
+    if (k >= 2 && (lines.length - k) % k === 0 && lines.length > k) {
+      const rows = [];
+      for (let i = 0; i < lines.length; i += k) rows.push(lines.slice(i, i + k));
+      return rows;
+    }
+    // 4) 空白 2 つ以上・全角空白区切り
+    const spaceRows = lines.map((l) => l.split(/\s{2,}|　+/).map((c) => c.trim()).filter(Boolean)).filter((r) => r.length >= 2);
+    if (spaceRows.length >= 2) return spaceRows;
+    // 5) カンマ区切り
+    const commaLines = lines.filter((l) => l.includes(','));
+    if (commaLines.length >= 2) return commaLines.map((l) => l.split(',').map((c) => c.trim()));
     return null;
   }
 
@@ -1025,7 +1053,7 @@
       items.push({
         title: title.slice(0, 50),
         minutes: clamp(Math.round(minutes * 2) / 2, 0.5, 600),
-        presenter: col.presenter >= 0 ? String(r[col.presenter] || '').replace(/(さん|様|氏)$/, '').trim().slice(0, 20) : '',
+        presenter: col.presenter >= 0 ? String(r[col.presenter] || '').replace(/(さん|様|氏)$/, '').replace(/^(-|－|ー|—|―|なし|未定|不明|n\/a)$/i, '').trim().slice(0, 20) : '',
         estimated,
       });
     });
@@ -1273,33 +1301,76 @@
       }
       toast('指示文をコピーしました。Copilot に貼り付けて、会議資料と一緒に送ってください');
     });
-    const runTable = (text, html) => {
+    /** 何を受け取ったかを表示（読み取れなかったときの手がかり） */
+    const describe = (text, html) => {
+      const parts = [];
+      parts.push(html && /<table/i.test(html) ? 'HTML の表：あり' : 'HTML の表：なし');
+      const t = String(text || '');
+      const lines = t.split('\n').filter((l) => l.trim()).length;
+      parts.push(`文字：${t.length} 文字・${lines} 行`);
+      parts.push(t.includes('|') ? '区切り：|' : t.includes('\t') ? '区切り：タブ' : '区切り：見つからない');
+      return parts.join(' ／ ');
+    };
+    const showDiag = (msg) => {
+      const el = $('#tableDiag');
+      el.hidden = !msg;
+      el.textContent = msg || '';
+    };
+    const tryTable = (text, html) => {
       const r = parseAgendaTable(text, html);
-      if (!r) {
-        toast('表として読み取れませんでした。Copilot の表全体（見出し行を含む）をコピーして貼り付けてください', true);
-        return;
-      }
+      if (!r) return false;
+      showDiag('');
       applyParsed(r);
       $('#tablePaste').value = '';
+      return true;
     };
+
     $('#tablePaste').addEventListener('paste', (e) => {
-      const html = e.clipboardData && e.clipboardData.getData('text/html');
-      const text = e.clipboardData && e.clipboardData.getData('text/plain');
-      if (html && /<table/i.test(html)) {
-        e.preventDefault();
-        runTable(text, html);
+      const html = (e.clipboardData && e.clipboardData.getData('text/html')) || '';
+      const text = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+      if (!html && !text) {
+        // 会社のポリシー等で貼り付けの中身が渡されない場合
+        setTimeout(() => {
+          if (!$('#tablePaste').value) showDiag('貼り付けた内容を受け取れませんでした。社内の設定でこのサイトへの貼り付けが制限されている可能性があります。下の「手で入力」をお使いください。');
+        }, 50);
         return;
       }
-      // 文字の表はいったん欄に入れてから読み取る
+      if (tryTable(text, html)) { e.preventDefault(); return; }
+      // 読み取れなかったときは、そのまま欄に入れて中身を確認できるようにする
       setTimeout(() => {
-        const v = $('#tablePaste').value;
-        if (rowsFromText(v)) runTable(v, '');
+        showDiag('表として読み取れませんでした（' + describe(text, html) + '）。Copilot の回答のコードブロック右上の「コピー」ボタンでコピーし直してください。');
       }, 0);
     });
+
     $('#btnParseTable').addEventListener('click', () => {
       const v = $('#tablePaste').value.trim();
-      if (!v) { toast('Copilot の表を貼り付けてください', true); return; }
-      runTable(v, '');
+      if (!v) { toast('Copilot の回答を貼り付けてください', true); return; }
+      if (!tryTable(v, '')) showDiag('表として読み取れませんでした（' + describe(v, '') + '）。1 行目が「順|議題|分|発表者」になっているか確認してください。');
+    });
+
+    // クリップボードから直接読み込む（貼り付け操作がうまくいかない場合）
+    $('#btnReadClipboard').addEventListener('click', async () => {
+      let html = '';
+      let text = '';
+      try {
+        if (navigator.clipboard && navigator.clipboard.read) {
+          const items = await navigator.clipboard.read();
+          for (const it of items) {
+            if (!html && it.types.includes('text/html')) html = await (await it.getType('text/html')).text();
+            if (!text && it.types.includes('text/plain')) text = await (await it.getType('text/plain')).text();
+          }
+        } else if (navigator.clipboard && navigator.clipboard.readText) {
+          text = await navigator.clipboard.readText();
+        }
+      } catch {
+        showDiag('クリップボードを読めませんでした。ブラウザの「クリップボードへのアクセス」を許可するか、欄に Ctrl+V で貼り付けてください。');
+        return;
+      }
+      if (!html && !text) { showDiag('クリップボードが空か、内容を受け取れませんでした。'); return; }
+      if (!tryTable(text, html)) {
+        $('#tablePaste').value = text;
+        showDiag('表として読み取れませんでした（' + describe(text, html) + '）。');
+      }
     });
 
     // テキスト
