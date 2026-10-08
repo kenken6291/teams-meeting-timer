@@ -3,7 +3,7 @@
  *
  *  【社外に文字情報を出さない設計】
  *   - 議題名・発表者名・会議名は、この PC のブラウザの中（localStorage）だけに置く
- *   - サーバー（Google Apps Script）へ送るのは数字と鍵だけ
+ *   - サーバー（Google Apps Script）へ送るのは数字と鍵、そして進行役の会員情報（ログイン用）だけ
  *       持ち時間（分）の並び、議題番号、残り時間の操作、ルーム ID（ルーム名のハッシュ）、
  *       合言葉のハッシュ、閲覧キー
  *   - 画像の文字認識・テキストの読み取りは、すべてこのブラウザの中で行う
@@ -121,7 +121,10 @@
   /* ============================================================
    *  API 通信（数字と鍵だけを送る）
    * ============================================================ */
-  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'];
+  const AUTH_ACTIONS = ['register', 'login', 'forgotPassword', 'changePassword', 'logout', 'me'];
+  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'].concat(AUTH_ACTIONS);
+  const LOGIN_ERRORS = ['login_required', 'session_expired'];
+  const sessionToken = () => (MODE === 'control' && window.TimerAuth ? window.TimerAuth.token() : '');
   const COMMAND_ACTIONS = ['start', 'pause', 'toggle', 'reset', 'adjust', 'select', 'next', 'prev',
     'setDuration', 'setAgenda', 'setOptions'];
   const RETRY_STATUS = [404, 408, 429, 500, 502, 503, 504];
@@ -129,9 +132,9 @@
 
   async function api(action, payload = {}) {
     if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl を設定してください'), { code: 'no_api' });
-    if (!cfg.roomId) throw Object.assign(new Error('ルームが未設定です'), { code: 'unauthorized' });
+    if (!cfg.roomId && !AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('ルームが未設定です'), { code: 'unauthorized' });
     if (!cfg.token && !NO_AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('合言葉が未設定です'), { code: 'unauthorized' });
-    const body = Object.assign({ action, room: cfg.roomId, token: cfg.token }, payload);
+    const body = Object.assign({ action, room: cfg.roomId, token: cfg.token, session: sessionToken() }, payload);
     if (COMMAND_ACTIONS.includes(action) && !body.opId) body.opId = newOpId();
 
     const MAX_TRY = 3;
@@ -168,7 +171,15 @@
       }
       if (data.serverNow) syncClock(data.serverNow, t0, t1);
       if (data.role) st.role = data.role;
-      if (!data.ok) throw Object.assign(new Error(errorMessage(data.error, data.message)), { code: data.error });
+      if (!data.ok) {
+        const err = Object.assign(new Error(errorMessage(data.error, data.message)), { code: data.error });
+        // ログイン切れ・仮パスワードのままなら会員認証の画面へ（ログイン操作そのものは除く）
+        if (MODE === 'control' && window.TimerAuth && !['login', 'register', 'forgotPassword'].includes(action)) {
+          if (LOGIN_ERRORS.includes(data.error)) window.TimerAuth.requireLogin(err.message);
+          if (data.error === 'must_change_password') window.TimerAuth.forceChange();
+        }
+        throw err;
+      }
       if (data.state) applyState(data.state);
       if (cfg.token) markSuccess();
       return data;
@@ -616,7 +627,7 @@
 
     document.addEventListener('keydown', (e) => {
       if (st.role !== 'admin' || MODE !== 'control') return;
-      if (document.querySelector('dialog[open]')) return;
+      if (document.querySelector('dialog[open]') || document.body.classList.contains('auth-open')) return;
       if (e.target.closest('input, textarea, select, button')) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const map = { ' ': ['toggle'], ArrowRight: ['next'], ArrowLeft: ['prev'], '+': ['adjust', 60], ';': ['adjust', 60], '=': ['adjust', 60], '-': ['adjust', -60] };
@@ -1121,7 +1132,7 @@
 
     // どこで Ctrl+V しても画像なら取り込む
     document.addEventListener('paste', (e) => {
-      if (st.role !== 'admin' || MODE !== 'control') return;
+      if (st.role !== 'admin' || MODE !== 'control' || document.body.classList.contains('auth-open')) return;
       const files = clipboardImages(e);
       if (!files.length) return;
       const dlg = $('#importDlg');
@@ -1283,8 +1294,14 @@
         cfg.token = getStoredToken(cfg.roomId);
       }
       setText('#roomName', cfg.roomName || '未設定');
-      if (!cfg.api) openSettings('config.js の apiUrl を設定してください');
-      else if (!cfg.token) openSettings('ルーム名と合言葉を入力してください');
+      setInterval(render, 200);
+      if (!cfg.api) { openSettings('config.js の apiUrl を設定してください'); return; }
+      // 操作画面は進行役のログインが必要。ログイン後に同期を始める
+      window.TimerAuth.init(api, () => {
+        if (!cfg.token) openSettings('ルーム名と合言葉を入力してください');
+        pollLoop();
+      });
+      return;
     } else {
       // 閲覧・オーバーレイ：URL の # の後ろからルーム ID と閲覧キーを読む
       const r = String(hs.get('r') || '').toLowerCase();

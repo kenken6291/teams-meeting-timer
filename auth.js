@@ -1,9 +1,10 @@
 /* ============================================================
  *  Teams Meeting Timer — auth.js（進行役の会員認証）
- *  - ログイン／新規登録（仮パスワードをメール送信）／パスワード再発行
+ *  - ログイン／新規登録（仮パスワードをメール送信）／仮パスワード再発行
  *  - 仮パスワードでログインしたらパスワード変更を必須にする
  *  - 新しいパスワードをその場で解析（強さメーター＋条件チェック）
  *  - パスワードの表示・非表示切替
+ *  送るのは会員情報（メールアドレス・ニックネーム・パスワード）だけ。会議の内容は送らない。
  *  通信は app.js の api() を借りる（TimerAuth.init で受け取る）
  * ============================================================ */
 (() => {
@@ -25,13 +26,12 @@
     sess = s;
     try {
       if (s) localStorage.setItem(LS_KEY, JSON.stringify(s)); else localStorage.removeItem(LS_KEY);
-    } catch { /* 保存できない環境は無視 */ }
+    } catch { /* 無視 */ }
     renderUser();
   }
 
   /* ============================================================
-   *  パスワード解析
-   *  必須条件（サーバーと同じ）を満たし、確認欄と一致したときだけ変更ボタンが押せる
+   *  パスワード解析（必須条件はサーバーと同じ）
    * ============================================================ */
   const COMMON = ['password', 'passw0rd', 'qwerty', 'letmein', 'welcome', 'iloveyou', 'admin', 'abc123',
     '123456', '12345678', '123456789', 'monkey', 'dragon', 'test', 'guest', 'teams', 'meeting', 'timer',
@@ -53,7 +53,6 @@
     const local = String(ctx.email || '').split('@')[0].toLowerCase();
     const nick = String(ctx.nickname || '').toLowerCase();
     const kinds = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((re) => re.test(pw)).length;
-
     const checks = [
       { key: 'len', label: '8文字以上', ok: pw.length >= 8 && pw.length <= 64, required: true },
       { key: 'mix', label: '英字と数字の両方を含む', ok: /[A-Za-z]/.test(pw) && /[0-9]/.test(pw), required: true },
@@ -64,7 +63,6 @@
       { key: 'long', label: '12文字以上（より安全）', ok: pw.length >= 12, required: false },
       { key: 'variety', label: '大文字・小文字・数字・記号のうち3種類以上（より安全）', ok: kinds >= 3, required: false },
     ];
-
     const valid = checks.filter((c) => c.required).every((c) => c.ok);
     let score = 0;
     if (pw.length) {
@@ -104,7 +102,6 @@
   function setBusy(form, on) {
     $$('button, input', form).forEach((el) => { el.disabled = on; });
   }
-
   function renderUser() {
     const logged = !!(sess && sess.token);
     document.body.classList.toggle('is-logged-in', logged);
@@ -134,8 +131,7 @@
     const pw = $('#pwNew').value;
     const confirm = $('#pwConfirm').value;
     const a = analyzePassword(pw, sess || {});
-    const meter = $('#pwMeter');
-    meter.dataset.level = a.level;
+    $('#pwMeter').dataset.level = a.level;
     $('#pwMeterLabel').textContent = pw ? `強さ：${a.label}` : '強さ：—';
     $('#pwChecks').innerHTML = a.checks.map((c) =>
       `<li class="${c.ok ? 'ok' : 'ng'} ${c.required ? 'req' : 'opt'}"><span aria-hidden="true">${c.ok ? '✓' : c.required ? '×' : '・'}</span>${c.label}</li>`).join('');
@@ -154,21 +150,31 @@
     if (!apiFn) throw new Error('初期化されていません');
     return apiFn(action, payload);
   }
-
-  function errText(e) {
-    return (e && e.message) || '通信に失敗しました';
-  }
+  const errText = (e) => (e && e.message) || '通信に失敗しました';
 
   function afterLogin() {
     hideScreen();
-    if (sess && sess.mustChange) {
-      openChange(true);
-      return;
-    }
+    if (sess && sess.mustChange) { openChange(true); return; }
     if (!readyCalled) {
       readyCalled = true;
       if (onReady) onReady();
     }
+  }
+
+  function flash(text) {
+    const t = $('#toast');
+    if (!t) return;
+    t.textContent = text;
+    t.classList.remove('error');
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+
+  async function logout() {
+    if (!confirm('ログアウトしますか？')) return;
+    try { await call('logout', {}); } catch { /* 期限切れでも続行 */ }
+    saveSession(null);
+    location.reload();
   }
 
   /* ============================================================
@@ -254,7 +260,6 @@
       }
     });
 
-    // パスワード変更
     ['#pwNew', '#pwConfirm', '#pwCurrent'].forEach((sel) => $(sel).addEventListener('input', renderAnalysis));
     $('#pwForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -263,10 +268,7 @@
       setMsg('#pwMsg', '変更しています…', 'info');
       $('#pwSubmit').disabled = true;
       try {
-        const r = await call('changePassword', {
-          currentPassword: $('#pwCurrent').value,
-          newPassword: $('#pwNew').value,
-        });
+        const r = await call('changePassword', { currentPassword: $('#pwCurrent').value, newPassword: $('#pwNew').value });
         saveSession(Object.assign({}, sess, r.user));
         $('#pwDlg').close();
         flash('パスワードを変更しました');
@@ -276,7 +278,6 @@
         renderAnalysis();
       }
     });
-    // 仮パスワードのままでは閉じられない
     $('#pwDlg').addEventListener('cancel', (e) => { if (forcedChange) e.preventDefault(); });
     $('#pwDlgClose').addEventListener('click', () => $('#pwDlg').close());
 
@@ -288,27 +289,10 @@
     if (last) $('#loginEmail').value = last;
   }
 
-  function flash(text) {
-    const t = $('#toast');
-    if (!t) return;
-    t.textContent = text;
-    t.classList.remove('error');
-    t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 3000);
-  }
-
-  async function logout() {
-    if (!confirm('ログアウトしますか？')) return;
-    try { await call('logout', {}); } catch { /* 期限切れでも続行 */ }
-    saveSession(null);
-    location.reload();
-  }
-
   /* ============================================================
    *  公開 API（app.js から使う）
    * ============================================================ */
   window.TimerAuth = {
-    /** 起動。ログイン済みなら ready をすぐ呼び、未ログインならログイン画面を出す */
     async init(api, ready) {
       apiFn = api;
       onReady = ready;
@@ -326,8 +310,7 @@
             showScreen('login', 'ログインの有効期限が切れました。もう一度ログインしてください');
             return;
           }
-          // 通信エラーのときは手元のセッションで続行（次の通信で再確認される）
-          afterLogin();
+          afterLogin();   // 通信エラー時は手元のセッションで続行
           return;
         }
       }
@@ -335,13 +318,11 @@
     },
     token() { return (sess && sess.token) || ''; },
     user() { return sess; },
-    /** サーバーから「ログインが必要」と返ってきたとき */
     requireLogin(message) {
       if (!$('#authScreen').hidden) return;
       saveSession(null);
       showScreen('login', message || 'もう一度ログインしてください');
     },
-    /** サーバーから「パスワード変更が必要」と返ってきたとき */
     forceChange() {
       if (sess) saveSession(Object.assign({}, sess, { mustChange: true }));
       if (!$('#pwDlg').open) openChange(true);
