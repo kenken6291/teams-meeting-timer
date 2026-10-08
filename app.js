@@ -1,31 +1,33 @@
 /* ============================================================
  *  Teams Meeting Timer — app.js
+ *
+ *  【社外に文字情報を出さない設計】
+ *   - 議題名・発表者名・会議名は、この PC のブラウザの中（localStorage）だけに置く
+ *   - サーバー（Google Apps Script）へ送るのは数字と鍵だけ
+ *       持ち時間（分）の並び、議題番号、残り時間の操作、ルーム ID（ルーム名のハッシュ）、
+ *       合言葉のハッシュ、閲覧キー
+ *   - 画像の文字認識・テキストの読み取りは、すべてこのブラウザの中で行う
+ *     （画像も文字も外部へ送信しない。文字認識プログラムのダウンロードのみ発生）
+ *   - 共有 URL のルーム ID と閲覧キーは「#」の後ろに置く（# 以降はサーバーへ送られない）
+ *
  *  モード
- *    ?mode=control  操作画面（既定）。合言葉で操作可、閲覧キーなら表示のみ
+ *    ?mode=control  操作画面（既定）
  *    ?mode=view     閲覧専用の大きな表示
  *    ?mode=overlay  OBS ブラウザソース用の透過オーバーレイ
- *  主な URL パラメータ
- *    room / token（閲覧キー。操作画面では合言葉を画面から入力）/ poll(ms)
- *    api … config.js の apiUrl が未設定のときだけ有効
- *    overlay 用: bg(transparent|green|blue|magenta) pos(br|bl|tr|tl|bc|tc)
- *                size(s|m|l|xl) title(0|1) bar(0|1) hideIdle(0|1)
- *  設計メモ
- *    - カウントダウンはブラウザ側で計算し、サーバーとは数秒おきに状態だけ同期する
- *    - サーバー時刻との差（offset）を補正するので、複数端末の表示がずれない
- *    - 通信が切れても表示は止まらない（最後に受け取った状態で進み続ける）
  * ============================================================ */
 (() => {
   'use strict';
 
-  /** 接続先は config.js（window.TIMER_CONFIG）で設定する */
+  /* ---------- 設定 ---------- */
   const APP_CONFIG = window.TIMER_CONFIG || {};
-  const PLACEHOLDER_API = /X{6,}/;
   const CONFIG_API_URL = (() => {
     const u = String(APP_CONFIG.apiUrl || '').trim();
-    return u && !PLACEHOLDER_API.test(u) ? u : '';
+    return u && !/X{6,}/.test(u) ? u : '';
   })();
   const API_FIXED = !!CONFIG_API_URL;
-  const LS_KEY = 'teamsTimer.config.v1';
+  const LS_KEY = 'teamsTimer.config.v2';
+  const LABEL_PREFIX = 'teamsTimer.labels.';
+  const TESSERACT_URL = APP_CONFIG.tesseractUrl || 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
 
   /* ---------- ユーティリティ ---------- */
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -34,64 +36,74 @@
   const pad2 = (n) => String(n).padStart(2, '0');
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const setText = (sel, text) => { const el = typeof sel === 'string' ? $(sel) : sel; if (el && el.textContent !== text) el.textContent = text; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const qs = new URLSearchParams(location.search);
+  const hs = new URLSearchParams(location.hash.replace(/^#/, ''));
   const MODE = ['control', 'view', 'overlay'].includes(qs.get('mode')) ? qs.get('mode') : 'control';
 
   function loadSaved() {
     try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch { return {}; }
   }
   function saveSaved(obj) {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(Object.assign(loadSaved(), obj))); } catch { /* 保存できない環境は無視 */ }
-  }
-  const ROOM_RE = /^[A-Za-z0-9_-]{1,40}$/;
-  function sanitizeRoom(r) {
-    r = String(r || '').trim();
-    return ROOM_RE.test(r) ? r : 'default';
-  }
-  /** 合言葉はルームごとにこのブラウザへ保存する */
-  function getStoredToken(room) {
-    const t = loadSaved().tokens || {};
-    return t[room] || '';
-  }
-  function storeToken(room, token) {
-    const tokens = Object.assign({}, loadSaved().tokens);
-    if (token) tokens[room] = token; else delete tokens[room];
-    saveSaved({ tokens, room });
+    try { localStorage.setItem(LS_KEY, JSON.stringify(Object.assign(loadSaved(), obj))); } catch { /* 無視 */ }
   }
 
+  /* ---------- ハッシュ（ルーム名・合言葉はハッシュにしてから送る） ---------- */
+  async function sha256Hex(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  const roomIdOf = async (name) => (await sha256Hex('tmt-room:' + name)).slice(0, 32);
+  const passTokenOf = (roomId, pass) => sha256Hex('tmt-pass:' + roomId + ':' + pass);
+  const ROOM_RE = /^[A-Za-z0-9_-]{1,40}$/;
+  const ROOM_ID_RE = /^[a-f0-9]{32}$/;
+
+  function getStoredToken(roomId) {
+    return (loadSaved().tokens || {})[roomId] || '';
+  }
+  function storeToken(roomId, token) {
+    const tokens = Object.assign({}, loadSaved().tokens);
+    if (token) tokens[roomId] = token; else delete tokens[roomId];
+    saveSaved({ tokens });
+  }
+
+  /* ---------- 議題名など（この端末だけに保存） ---------- */
+  function loadLabels(roomId = cfg.roomId) {
+    if (!roomId) return null;
+    try { return JSON.parse(localStorage.getItem(LABEL_PREFIX + roomId) || 'null'); } catch { return null; }
+  }
+  function saveLabels(data, roomId = cfg.roomId) {
+    try {
+      if (data) localStorage.setItem(LABEL_PREFIX + roomId, JSON.stringify(data));
+      else localStorage.removeItem(LABEL_PREFIX + roomId);
+    } catch { /* 無視 */ }
+  }
+  /** サーバーの持ち時間の並びと一致するときだけ議題名を使う（別のアジェンダに付け替わるのを防ぐ） */
+  function labelsFor(s) {
+    const L = loadLabels();
+    if (!L || !s) return { title: '', freeTitle: L ? L.freeTitle || '' : '', items: null };
+    const items = Array.isArray(L.items) && L.items.length === s.agenda.length &&
+      L.items.every((it, i) => Number(it.minutes) === Number(s.agenda[i])) ? L.items : null;
+    return { title: L.title || '', freeTitle: L.freeTitle || '', items };
+  }
+
+  /* ---------- 接続先 ---------- */
   const saved = loadSaved();
   const cfg = {
-    // config.js に URL があればそれを最優先（URL パラメータや保存値では上書きしない）
-    api: API_FIXED ? CONFIG_API_URL : String(qs.get('api') || saved.api || '').trim(),
-    room: sanitizeRoom(qs.get('room') || saved.room || APP_CONFIG.defaultRoom || 'default'),
+    api: API_FIXED ? CONFIG_API_URL : String(hs.get('api') || qs.get('api') || saved.api || '').trim(),
+    roomName: '',
+    roomId: '',
     token: '',
     poll: clamp(Number(qs.get('poll')) || (MODE === 'overlay' ? 3000 : 2500), 1000, 30000),
   };
-
-  // 合言葉／閲覧キーの決め方
-  //  - overlay / view : URL の token をそのまま使う（保存しない。進行役の合言葉を上書きしないため）
-  //  - control        : URL の token があれば保存してアドレスバーから消す（画面共有での漏えい防止）
-  if (MODE === 'control') {
-    if (qs.has('token')) {
-      storeToken(cfg.room, String(qs.get('token')).trim());
-      qs.delete('token');
-      qs.delete('api');
-      const rest = qs.toString();
-      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
-    }
-    cfg.token = getStoredToken(cfg.room);
-    if (!API_FIXED && qs.has('api')) saveSaved({ api: cfg.api });
-  } else {
-    cfg.token = String(qs.get('token') || (MODE === 'view' ? getStoredToken(cfg.room) : '')).trim();
-  }
 
   /* ---------- 実行時状態 ---------- */
   const st = {
     state: null,
     role: null,
     info: null,
-    offset: 0,          // サーバー時刻 − ローカル時刻（ms）
+    offset: 0,
     bestRtt: Infinity,
     offsetAt: 0,
     online: false,
@@ -104,35 +116,22 @@
     sound: saved.sound !== undefined ? !!saved.sound : MODE === 'control',
     wakeLock: null,
   };
-
   const now = () => Date.now() + st.offset;
 
   /* ============================================================
-   *  API 通信
-   *  POST は text/plain で送る（CORS のプリフライトを避けるため）
+   *  API 通信（数字と鍵だけを送る）
    * ============================================================ */
-  /** 合言葉が無くても呼べる操作（会員認証と、ルームの確認・作成） */
-  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom', 'register', 'login', 'forgotPassword', 'changePassword', 'logout', 'me'];
-  const LOGIN_ERRORS = ['login_required', 'session_expired'];
-  const sessionToken = () => (MODE === 'control' && window.TimerAuth ? window.TimerAuth.token() : '');
-
-  /** 状態を変える操作。通信の再送で二重に実行されないよう opId を付ける */
+  const NO_AUTH_ACTIONS = ['roomInfo', 'createRoom'];
   const COMMAND_ACTIONS = ['start', 'pause', 'toggle', 'reset', 'adjust', 'select', 'next', 'prev',
     'setDuration', 'setAgenda', 'setOptions'];
   const RETRY_STATUS = [404, 408, 429, 500, 502, 503, 504];
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const newOpId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 
-  /**
-   * GAS への通信。
-   * GAS は POST の結果を一度 script.googleusercontent.com へリダイレクトして返すため、
-   * 混雑時や同時アクセス時にこのリダイレクト先が 404 などになることがある。
-   * そのため一時的なエラーは最大 3 回まで自動で再送する（操作は opId でサーバー側が重複排除）。
-   */
-  async function api(action, payload = {}, { method = 'POST' } = {}) {
-    if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl に GAS ウェブアプリの URL を設定してください'), { code: 'no_api' });
+  async function api(action, payload = {}) {
+    if (!cfg.api) throw Object.assign(new Error('API の URL が未設定です。config.js の apiUrl を設定してください'), { code: 'no_api' });
+    if (!cfg.roomId) throw Object.assign(new Error('ルームが未設定です'), { code: 'unauthorized' });
     if (!cfg.token && !NO_AUTH_ACTIONS.includes(action)) throw Object.assign(new Error('合言葉が未設定です'), { code: 'unauthorized' });
-    const body = Object.assign({ action, room: cfg.room, token: cfg.token, session: sessionToken() }, payload);
+    const body = Object.assign({ action, room: cfg.roomId, token: cfg.token }, payload);
     if (COMMAND_ACTIONS.includes(action) && !body.opId) body.opId = newOpId();
 
     const MAX_TRY = 3;
@@ -141,52 +140,35 @@
       const t0 = Date.now();
       let res;
       try {
-        if (method === 'GET') {
-          res = await fetch(cfg.api + (cfg.api.includes('?') ? '&' : '?') + new URLSearchParams(body).toString(),
-            { cache: 'no-store', redirect: 'follow' });
-        } else {
-          res = await fetch(cfg.api, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify(body),
-            redirect: 'follow',
-            cache: 'no-store',
-          });
-        }
-      } catch (e) {
+        res = await fetch(cfg.api, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(body),
+          redirect: 'follow',
+          cache: 'no-store',
+        });
+      } catch {
         lastErr = new Error('サーバーに接続できません（ネットワークを確認してください）');
         if (attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
         throw lastErr;
       }
       const t1 = Date.now();
-
       if (!res.ok) {
-        lastErr = new Error(res.status === 404
-          ? '通信エラー（HTTP 404）。config.js の URL と、GAS が最新バージョンでデプロイされているか確認してください'
-          : '通信エラー（HTTP ' + res.status + '）');
+        lastErr = new Error('通信エラー（HTTP ' + res.status + '）');
         if (RETRY_STATUS.includes(res.status) && attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
         throw lastErr;
       }
-
       let data;
       try {
         data = await res.json();
       } catch {
-        lastErr = new Error('API の応答を読めません。URL が「/exec」で終わっているか、デプロイのアクセス権が「全員」か確認してください');
+        lastErr = new Error('API の応答を読めません。config.js の URL とデプロイ設定を確認してください');
         if (attempt < MAX_TRY) { await sleep(400 * attempt); continue; }
         throw lastErr;
       }
       if (data.serverNow) syncClock(data.serverNow, t0, t1);
       if (data.role) st.role = data.role;
-      if (!data.ok) {
-        const err = Object.assign(new Error(errorMessage(data.error, data.message)), { code: data.error });
-        // ログイン切れ・仮パスワードのままの場合は会員認証の画面へ（ログイン操作そのものは除く）
-        if (MODE === 'control' && window.TimerAuth && !['login', 'register', 'forgotPassword'].includes(action)) {
-          if (LOGIN_ERRORS.includes(data.error)) window.TimerAuth.requireLogin(err.message);
-          if (data.error === 'must_change_password') window.TimerAuth.forceChange();
-        }
-        throw err;
-      }
+      if (!data.ok) throw Object.assign(new Error(errorMessage(data.error, data.message)), { code: data.error });
       if (data.state) applyState(data.state);
       if (cfg.token) markSuccess();
       return data;
@@ -200,6 +182,7 @@
       room_not_found: 'このルームはまだありません。ルーム名を確認するか、新しく作成してください',
       locked: '合言葉を続けて間違えたため、このルームは 10 分間入れません',
       forbidden: 'この操作には進行役の合言葉が必要です',
+      invalid_room: 'ルームの指定が正しくありません',
       method_not_allowed: '許可されていない呼び出し方です',
     };
     return map[code] || serverMessage || code || '不明なエラー';
@@ -208,7 +191,6 @@
   function syncClock(serverNow, t0, t1) {
     const rtt = t1 - t0;
     const sample = serverNow - (t0 + t1) / 2;
-    // 往復時間が短いほど精度が高い。60 秒ごとには必ず更新してドリフトを吸収
     if (rtt <= st.bestRtt * 1.5 || Date.now() - st.offsetAt > 60000) {
       st.offset = sample;
       st.bestRtt = Math.min(st.bestRtt, rtt);
@@ -218,28 +200,27 @@
 
   function applyState(s, force = false) {
     const cur = st.state;
-    if (!force && cur && cur.room === s.room && s.version < cur.version) return; // 古い応答は捨てる
+    if (!force && cur && cur.room === s.room && s.version < cur.version) return;
     if (cur && cur.index !== s.index) st.lastRem = null;
     st.state = s;
     renderStatic();
     render();
   }
 
-  /** 状態の定期同期。失敗時は間隔を延ばし、どこかの通信が成功したらすぐ通常間隔に戻す */
+  /* ---------- 定期同期 ---------- */
   let polling = false;
   function schedulePoll(delay) {
     clearTimeout(st.pollTimer);
     st.pollTimer = setTimeout(pollLoop, delay);
   }
-
   async function pollLoop() {
     clearTimeout(st.pollTimer);
     if (polling) return;
     polling = true;
     try {
-      if (cfg.api && cfg.token) {
+      if (cfg.api && cfg.roomId && cfg.token) {
         try {
-          await api('state', {});
+          await api('state');
           if (st.role === 'admin' && MODE === 'control' && !st.info) loadShareInfo();
         } catch (e) {
           markFailure(e);
@@ -250,30 +231,24 @@
     } finally {
       polling = false;
     }
-    const delay = st.failCount ? Math.min(cfg.poll * 2 ** st.failCount, 20000) : cfg.poll;
-    schedulePoll(delay);
+    schedulePoll(st.failCount ? Math.min(cfg.poll * 2 ** st.failCount, 20000) : cfg.poll);
   }
-
   function markSuccess() {
     const wasFailing = st.failCount > 0 || !st.online;
     st.failCount = 0;
     setOnline(true);
-    if (wasFailing && !polling) schedulePoll(cfg.poll);   // 延びていた同期間隔を元に戻す
+    if (wasFailing && !polling) schedulePoll(cfg.poll);
   }
-
   function markFailure(e) {
+    st.failCount++;
     if (['unauthorized', 'room_not_found', 'locked'].includes(e.code)) {
-      st.failCount++;
       setOnline(false, e.message);
       if (MODE === 'control' && st.failCount === 1) openSettings(e.message);
       return;
     }
-    st.failCount++;
-    // 1 回の失敗では「未接続」にしない（GAS は一時的なエラーを返すことがあるため）
     if (st.failCount >= 2) setOnline(false, e.message);
     else setText('#connText', '再接続しています');
   }
-
   function setOnline(ok, msg) {
     st.online = ok;
     const el = $('#conn');
@@ -281,12 +256,11 @@
       el.classList.toggle('online', ok);
       el.classList.toggle('offline', !ok);
       setText('#connText', ok ? '同期中' : '未接続' + (msg ? '：' + msg : ''));
-      el.title = ok ? 'サーバーと同期しています' : (msg || '');
+      el.title = ok ? 'サーバーと同期しています（送っているのは数字だけです）' : (msg || '');
     }
     $('#ovDot')?.classList.toggle('offline', !ok);
     setText('#roleLabel', st.role === 'admin' ? '進行役' : st.role === 'viewer' ? '閲覧のみ' : '未接続');
   }
-
   async function loadShareInfo() {
     try {
       const r = await api('shareInfo');
@@ -297,7 +271,7 @@
         b.textContent = st.info.hasWebhook ? 'Teams 連携済み' : 'Teams 未設定';
         b.className = 'badge admin-only ' + (st.info.hasWebhook ? 'good' : 'bad');
       }
-    } catch { /* 表示だけなので失敗しても続行 */ }
+    } catch { /* 表示だけ */ }
   }
 
   /* ============================================================
@@ -308,9 +282,21 @@
     return s.status === 'running' ? (s.endsAt - now()) / 1000 : Number(s.remainingSec);
   }
 
+  /** 表示用の議題情報。議題名はこの端末に保存されているときだけ出す */
   function currentItem(s = st.state) {
-    if (s && s.index >= 0 && s.agenda[s.index]) return s.agenda[s.index];
-    return { title: (s && (s.freeTitle || s.title)) || 'フリータイマー', minutes: s ? s.durationSec / 60 : 0, presenter: '' };
+    if (!s) return { title: '', presenter: '', minutes: 0, short: '' };
+    const L = labelsFor(s);
+    if (s.index >= 0 && s.agenda[s.index] !== undefined) {
+      const label = L.items ? L.items[s.index] : null;
+      const short = `議題 ${s.index + 1} / ${s.agenda.length}`;
+      return {
+        title: (label && label.title) || short,
+        presenter: (label && label.presenter) || '',
+        minutes: s.agenda[s.index],
+        short,
+      };
+    }
+    return { title: L.freeTitle || 'フリータイマー', presenter: '', minutes: s.durationSec / 60, short: 'アジェンダ外' };
   }
 
   function warnAt(s) { return s.durationSec > 300 ? 300 : s.durationSec * 0.3; }
@@ -355,8 +341,6 @@
 
   /* ============================================================
    *  描画
-   *  renderStatic: 状態が変わったときだけ
-   *  render      : 200ms ごと（時計とゲージ）
    * ============================================================ */
   function renderStatic() {
     const s = st.state;
@@ -365,25 +349,29 @@
     document.body.classList.toggle('is-admin', isAdmin);
     document.body.dataset.status = s.status;
 
+    const L = labelsFor(s);
     const item = currentItem(s);
     const hasAgenda = s.agenda.length > 0 && s.index >= 0;
-    setText('#meetingTitle', s.title || '会議タイマー');
-    setText('#roomName', s.room);
+    setText('#meetingTitle', L.title || '会議タイマー');
+    setText('#roomName', cfg.roomName || '（共有表示）');
     setText('#itemTitle', item.title);
     setText('#itemPresenter', item.presenter ? `発表：${item.presenter}` : '');
-    setText('#itemIndex', hasAgenda ? `議題 ${s.index + 1} / ${s.agenda.length}` : 'アジェンダ外');
+    setText('#itemIndex', hasAgenda ? item.short : 'アジェンダ外');
     setText('#statusLabel', { idle: '待機中', running: '進行中', paused: '一時停止中', finished: '全議題終了' }[s.status] || s.status);
     setText('#allotted', fmtMinutes(s.durationSec / 60));
 
-    const next = s.index >= 0 ? s.agenda[s.index + 1] : s.agenda[0];
-    setText('#nextTitle', next ? `${next.title}（${fmtMinutes(next.minutes)}）${next.presenter ? '　' + next.presenter : ''}` : 'なし');
+    const nextIdx = s.index >= 0 ? s.index + 1 : 0;
+    const nextMin = s.agenda[nextIdx];
+    const nextLabel = L.items ? L.items[nextIdx] : null;
+    setText('#nextTitle', nextMin !== undefined
+      ? `${(nextLabel && nextLabel.title) || `議題 ${nextIdx + 1}`}（${fmtMinutes(nextMin)}）${nextLabel && nextLabel.presenter ? '　' + nextLabel.presenter : ''}`
+      : 'なし');
 
     const btn = $('#btnToggle');
     if (btn) {
       btn.textContent = s.status === 'running' ? '一時停止' : s.status === 'paused' ? '再開' : '開始';
       btn.classList.toggle('is-running', s.status === 'running');
     }
-
     const notify = $('#optNotify');
     if (notify) notify.checked = !!s.notify;
     $$('#thrChips input').forEach((cb) => { cb.checked = s.thresholds.includes(Number(cb.value)); });
@@ -391,20 +379,19 @@
     const ln = $('#lastNotice');
     if (ln) {
       if (s.lastNotice) {
-        const t = new Date(s.lastNotice.at);
         ln.textContent = s.lastNotice.ok
-          ? `最後の Teams 通知：${fmtTime(t.getTime() - st.offset)}（${thresholdLabel(s.lastNotice.threshold)}）`
-          : `Teams 通知に失敗しました：${s.lastNotice.error}`;
+          ? `最後の Teams 通知：${fmtTime(s.lastNotice.at - st.offset)}（${thresholdLabel(s.lastNotice.threshold)}）`
+          : `Teams 通知に失敗しました（HTTP ${s.lastNotice.code || '-'}）`;
         ln.classList.toggle('bad', !s.lastNotice.ok);
       } else {
         ln.textContent = '';
       }
     }
 
-    // ゲージの目盛り（残り5分・1分の位置）
     placeMark('#markWarn', 300, s.durationSec);
     placeMark('#markDanger', 60, s.durationSec);
 
+    // オーバーレイ：この端末に議題名があれば名前、なければ「議題 2 / 5」
     setText('#ovTitle', item.title);
     renderAgenda();
   }
@@ -423,21 +410,24 @@
     if (!list || !s) return;
     if (!s.agenda.length) {
       list.innerHTML = `<li class="agenda-empty">${st.role === 'admin' && MODE === 'control'
-        ? '「資料から取り込む」で会議資料からアジェンダを作れます。'
+        ? '「アジェンダを取り込む」で、画像や文章から議題を作れます。'
         : 'アジェンダはまだありません。'}</li>`;
       setText('#agendaFoot', '');
       return;
     }
-    list.innerHTML = s.agenda.map((it, i) => {
+    const L = labelsFor(s);
+    list.innerHTML = s.agenda.map((min, i) => {
+      const label = L.items ? L.items[i] : null;
       const cls = i === s.index ? 'current' : (s.index >= 0 && i < s.index) || s.status === 'finished' ? 'done' : '';
       return `<li class="${cls}" data-index="${i}" tabindex="${st.role === 'admin' ? 0 : -1}">
         <span class="num">${i + 1}</span>
-        <span class="ttl">${esc(it.title)}${it.presenter ? `<span class="who">${esc(it.presenter)}</span>` : ''}</span>
-        <span class="min">${esc(fmtMinutes(it.minutes))}</span>
+        <span class="ttl">${esc((label && label.title) || `議題 ${i + 1}`)}${label && label.presenter ? `<span class="who">${esc(label.presenter)}</span>` : ''}</span>
+        <span class="min">${esc(fmtMinutes(min))}</span>
       </li>`;
     }).join('');
-    const total = s.agenda.reduce((a, it) => a + Number(it.minutes), 0);
-    setText('#agendaFoot', `合計 ${fmtMinutes(total)}（${s.agenda.length} 議題）`);
+    const total = s.agenda.reduce((a, m) => a + Number(m), 0);
+    setText('#agendaFoot', `合計 ${fmtMinutes(total)}（${s.agenda.length} 議題）` +
+      (L.items || MODE !== 'control' ? '' : '　※議題名はこの端末に保存されていません'));
   }
 
   function render() {
@@ -450,7 +440,7 @@
     const text = s.status === 'finished' ? '終了' : fmtClock(rem);
     setText('#clock', text);
     setText('#ovTime', text);
-    if (MODE !== 'overlay') document.title = `${text}｜${currentItem(s).title}`;
+    if (MODE !== 'overlay') document.title = `${text}｜会議タイマー`;
 
     const frac = s.durationSec > 0 ? clamp(rem / s.durationSec, 0, 1) : 0;
     const fill = $('#barFill');
@@ -458,20 +448,17 @@
     const ovb = $('#ovBar');
     if (ovb) ovb.style.transform = `scaleX(${frac})`;
 
-    // 終了予定（ローカル時刻で表示）
     const endLocal = s.status === 'running' ? s.endsAt - st.offset : Date.now() + Math.max(0, rem) * 1000;
     setText('#endsAt', s.status === 'finished' ? '—' : fmtTime(endLocal) + (s.status === 'running' ? '' : '（開始した場合）'));
     if (s.agenda.length && s.index >= 0 && s.status !== 'finished') {
-      const restMin = s.agenda.slice(s.index + 1).reduce((a, it) => a + Number(it.minutes), 0);
+      const restMin = s.agenda.slice(s.index + 1).reduce((a, m) => a + Number(m), 0);
       setText('#meetingEnd', fmtTime(endLocal + restMin * 60000));
     } else {
       setText('#meetingEnd', '—');
     }
-
     detectCrossing(s, rem);
   }
 
-  /* ---------- しきい値の通過検知 ---------- */
   function detectCrossing(s, rem) {
     if (s.status !== 'running') { st.lastRem = rem; st.lastIndex = s.index; return; }
     if (st.lastRem !== null && st.lastIndex === s.index) {
@@ -488,17 +475,15 @@
     document.body.classList.add('flash');
     setTimeout(() => document.body.classList.remove('flash'), 2000);
     beep(t === 0 ? 'end' : t <= 60 ? 'danger' : 'warn');
-
-    // サーバーに通知判定を依頼（重複はサーバー側で排除される）
     if (s.notify) {
       clearTimeout(st.checkTimer);
       st.checkTimer = setTimeout(async () => {
         try {
-          const r = await api('check', {});
+          const r = await api('check');
           if (r.notified !== null && r.notified !== undefined && st.role === 'admin' && MODE === 'control') {
             toast(`Teams に「${thresholdLabel(r.notified)}」を通知しました`);
           }
-        } catch { /* 1 分トリガーが拾うので無視 */ }
+        } catch { /* 1 分トリガーが拾う */ }
       }, 1200 + Math.random() * 800);
     }
   }
@@ -523,19 +508,15 @@
         o.start(t);
         o.stop(t + 0.26);
       });
-    } catch { /* 音が出せない環境は無視 */ }
+    } catch { /* 無視 */ }
   }
-
-  function renderSoundButton() {
-    setText('#btnSound', st.sound ? '音 オン' : '音 オフ');
-  }
+  function renderSoundButton() { setText('#btnSound', st.sound ? '音 オン' : '音 オフ'); }
 
   /* ============================================================
    *  操作
    * ============================================================ */
   async function act(action, payload = {}) {
     if (st.busy) return;
-    // 「開始／一時停止」は画面の状態から明示的な命令に変換する（再送されても結果が変わらない）
     if (action === 'toggle') action = st.state && st.state.status === 'running' ? 'pause' : 'start';
     st.busy = true;
     document.body.classList.add('is-busy');
@@ -544,36 +525,33 @@
       await api(action, payload);
     } catch (e) {
       toast(e.message, true);
-      try { const r = await api('state', {}); applyState(r.state, true); } catch { /* 次回ポーリングで回復 */ }
+      try { const r = await api('state'); applyState(r.state, true); } catch { /* 次回同期で回復 */ }
     } finally {
       st.busy = false;
       document.body.classList.remove('is-busy');
     }
   }
 
-  /** 開始・停止・時間調整は通信を待たずに画面へ反映（応答で正式な状態に置き換わる） */
   function optimistic(action, payload) {
     const cur = st.state;
-    if (!cur || !['toggle', 'start', 'pause', 'adjust'].includes(action)) return;
+    if (!cur || !['start', 'pause', 'adjust'].includes(action)) return;
     const s = JSON.parse(JSON.stringify(cur));
     const n = now();
-    if (action === 'start' && s.status === 'running') return;
-    if (action === 'pause' && s.status !== 'running') return;
-    if (['toggle', 'start', 'pause'].includes(action)) {
-      if (s.status === 'running') {
-        s.remainingSec = (s.endsAt - n) / 1000;
-        s.endsAt = null;
-        s.status = 'paused';
-      } else {
-        s.endsAt = n + Number(s.remainingSec) * 1000;
-        s.status = 'running';
-      }
+    if (action === 'start') {
+      if (s.status === 'running') return;
+      s.endsAt = n + Number(s.remainingSec) * 1000;
+      s.status = 'running';
+    } else if (action === 'pause') {
+      if (s.status !== 'running') return;
+      s.remainingSec = (s.endsAt - n) / 1000;
+      s.endsAt = null;
+      s.status = 'paused';
     } else {
       const d = Number(payload.seconds) || 0;
       if (s.status === 'running') s.endsAt += d * 1000; else s.remainingSec = Number(s.remainingSec) + d;
       s.durationSec = Math.max(1, s.durationSec + d);
     }
-    s.version = cur.version + 0.5; // 送信前に届いた古いポーリング結果で上書きされないように
+    s.version = cur.version + 0.5;
     st.state = s;
     renderStatic();
     render();
@@ -584,9 +562,8 @@
       btn.addEventListener('click', () => {
         const a = btn.dataset.act;
         if (a === 'reset' && !confirm('この議題の残り時間を最初に戻します。よろしいですか？')) return;
-        const payload = a === 'adjust' ? { seconds: Number(btn.dataset.sec) } : {};
         if (a === 'toggle') requestWakeLock();
-        act(a, payload);
+        act(a, a === 'adjust' ? { seconds: Number(btn.dataset.sec) } : {});
       });
     });
 
@@ -605,13 +582,15 @@
     $('#btnQuickSet').addEventListener('click', () => {
       const min = Number($('#quickMin').value);
       if (!(min > 0)) { toast('分には 0 より大きい数を入れてください', true); return; }
-      act('setDuration', { seconds: Math.round(min * 60), title: $('#quickTitle').value.trim() });
+      // タイトルはこの端末にだけ保存し、サーバーには秒数だけ送る
+      const L = loadLabels() || {};
+      saveLabels(Object.assign({}, L, { freeTitle: $('#quickTitle').value.trim() }));
+      act('setDuration', { seconds: Math.round(min * 60) });
     });
 
     $('#optNotify').addEventListener('change', (e) => act('setOptions', { notify: e.target.checked }));
     $('#thrChips').addEventListener('change', () => {
-      const list = $$('#thrChips input:checked').map((cb) => Number(cb.value));
-      act('setOptions', { thresholds: list });
+      act('setOptions', { thresholds: $$('#thrChips input:checked').map((cb) => Number(cb.value)) });
     });
 
     $('#btnTestNotify').addEventListener('click', async () => {
@@ -635,10 +614,9 @@
       else document.documentElement.requestFullscreen?.();
     });
 
-    // キーボード操作
     document.addEventListener('keydown', (e) => {
       if (st.role !== 'admin' || MODE !== 'control') return;
-      if (document.querySelector('dialog[open]') || document.body.classList.contains('auth-open')) return;
+      if (document.querySelector('dialog[open]')) return;
       if (e.target.closest('input, textarea, select, button')) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const map = { ' ': ['toggle'], ArrowRight: ['next'], ArrowLeft: ['prev'], '+': ['adjust', 60], ';': ['adjust', 60], '=': ['adjust', 60], '-': ['adjust', -60] };
@@ -649,14 +627,13 @@
     });
   }
 
-  /* ---------- 画面スリープ防止 ---------- */
   async function requestWakeLock() {
     try {
       if ('wakeLock' in navigator && !st.wakeLock) {
         st.wakeLock = await navigator.wakeLock.request('screen');
         st.wakeLock.addEventListener('release', () => { st.wakeLock = null; });
       }
-    } catch { /* 未対応ブラウザ */ }
+    } catch { /* 未対応 */ }
   }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && st.state?.status === 'running' && MODE !== 'overlay') requestWakeLock();
@@ -664,61 +641,65 @@
 
   /* ============================================================
    *  ルームと合言葉
-   *  - 既存ルーム：合言葉で入室
-   *  - 未作成ルーム：確認入力のあと、その合言葉でルームを作成
-   *  - 入室後：合言葉の変更・ルーム削除（進行役のみ）
+   *  ルーム名・合言葉はハッシュ化してから送る（名前そのものはサーバーに届かない）
    * ============================================================ */
   function openSettings(message) {
     const dlg = $('#settingsDlg');
     if (!dlg || dlg.open) return;
     $('#fieldApi').hidden = API_FIXED;
     $('#setApi').value = cfg.api;
-    $('#setRoom').value = cfg.room;
-    $('#setToken').value = cfg.token;
+    $('#setRoom').value = cfg.roomName;
+    $('#setToken').value = '';
     $('#setTokenConfirm').value = '';
     $('#fieldConfirm').hidden = true;
     $('#newPass').value = '';
     $('#newPassConfirm').value = '';
     setText('#passResult', '');
     setText('#btnSaveSettings', '入る');
-    setText('#setResult', message || '');
+    setText('#setResult', message || (cfg.token ? '合言葉は保存済みです。別のルームに入るときだけ入力してください' : ''));
     dlg.showModal();
   }
 
   async function enterRoom() {
     if (!API_FIXED) cfg.api = $('#setApi').value.trim();
-    const room = $('#setRoom').value.trim();
+    const name = $('#setRoom').value.trim();
     const pass = $('#setToken').value;
-    if (!ROOM_RE.test(room)) { setText('#setResult', 'ルーム名は半角英数字と - _ の 40 文字以内にしてください'); return; }
-    if (pass.length < 4 || pass.length > 64) { setText('#setResult', '合言葉は 4〜64 文字で入力してください'); return; }
+    if (!ROOM_RE.test(name)) { setText('#setResult', 'ルーム名は半角英数字と - _ の 40 文字以内にしてください'); return; }
+    const roomId = await roomIdOf(name);
+    let token = pass ? await passTokenOf(roomId, pass) : getStoredToken(roomId);
+    if (pass && (pass.length < 4 || pass.length > 64)) { setText('#setResult', '合言葉は 4〜64 文字で入力してください'); return; }
+    if (!token) { setText('#setResult', '合言葉を入力してください'); return; }
     if (!API_FIXED) saveSaved({ api: cfg.api });
 
     const btn = $('#btnSaveSettings');
     btn.disabled = true;
+    const prev = { roomName: cfg.roomName, roomId: cfg.roomId, token: cfg.token };
     try {
+      cfg.roomName = name;
+      cfg.roomId = roomId;
       const creating = !$('#fieldConfirm').hidden;
       if (creating) {
-        if ($('#setTokenConfirm').value !== pass) { setText('#setResult', '確認用の合言葉が一致しません'); return; }
-        cfg.room = room;
-        await api('createRoom', { passcode: pass });
-        cfg.token = pass;
-        storeToken(room, pass);
-        toast(`ルーム「${room}」を作りました。合言葉は参加する進行役にだけ伝えてください`);
+        if ($('#setTokenConfirm').value !== pass) { setText('#setResult', '確認用の合言葉が一致しません'); Object.assign(cfg, prev); return; }
+        cfg.token = '';
+        await api('createRoom', { passToken: token });
+        cfg.token = token;
+        toast(`ルーム「${name}」を作りました`);
       } else {
-        cfg.room = room;
         const info = await api('roomInfo');
         if (!info.exists) {
+          if (!pass) { setText('#setResult', 'このルームはまだありません。合言葉を入力してください'); Object.assign(cfg, prev); return; }
           $('#fieldConfirm').hidden = false;
           $('#setTokenConfirm').focus();
           setText('#btnSaveSettings', 'この合言葉でルームを作る');
-          setText('#setResult', `「${room}」はまだありません。合言葉をもう一度入力すると作成します`);
+          setText('#setResult', `「${name}」はまだありません。合言葉をもう一度入力すると作成します`);
+          Object.assign(cfg, prev);
           return;
         }
-        cfg.token = pass;
-        const r = await api('state');
-        storeToken(room, pass);
-        toast(r.role === 'admin' ? '進行役として入室しました' : '閲覧のみで入室しました');
+        cfg.token = token;
+        await api('state');
       }
+      storeToken(roomId, token);
+      saveSaved({ room: name });
       st.state = null;
       st.info = null;
       st.failCount = 0;
@@ -726,9 +707,11 @@
       applyState(r.state, true);
       setOnline(true);
       $('#settingsDlg').close();
+      if (!creating) toast(st.role === 'admin' ? '進行役として入室しました' : '閲覧のみで入室しました');
       if (st.role === 'admin') loadShareInfo();
       pollLoop();
     } catch (e) {
+      Object.assign(cfg, prev);
       setText('#setResult', e.message);
     } finally {
       btn.disabled = false;
@@ -738,14 +721,12 @@
   async function changePass() {
     const np = $('#newPass').value;
     if (np.length < 4 || np.length > 64) { setText('#passResult', '4〜64 文字で入力してください'); return; }
-    if (/^\s|\s$/.test(np)) { setText('#passResult', '先頭と末尾に空白は使えません'); return; }
     if (np !== $('#newPassConfirm').value) { setText('#passResult', '確認用と一致しません'); return; }
-    if (np === cfg.token) { setText('#passResult', '今と同じ合言葉です'); return; }
     try {
-      await api('changePasscode', { newPasscode: np });
-      cfg.token = np;
-      storeToken(cfg.room, np);
-      $('#setToken').value = np;
+      const newToken = await passTokenOf(cfg.roomId, np);
+      await api('changePasscode', { newPassToken: newToken });
+      cfg.token = newToken;
+      storeToken(cfg.roomId, newToken);
       $('#newPass').value = '';
       $('#newPassConfirm').value = '';
       setText('#passResult', '');
@@ -756,19 +737,20 @@
   }
 
   async function deleteRoom() {
-    const room = cfg.room;
-    const typed = prompt(`ルーム「${room}」を削除します。確認のためルーム名を入力してください`);
+    const name = cfg.roomName;
+    const typed = prompt(`ルーム「${name}」を削除します。確認のためルーム名を入力してください`);
     if (typed === null) return;
-    if (typed.trim() !== room) { toast('ルーム名が一致しないため削除しませんでした', true); return; }
+    if (typed.trim() !== name) { toast('ルーム名が一致しないため削除しませんでした', true); return; }
     try {
       await api('deleteRoom');
-      storeToken(room, '');
+      storeToken(cfg.roomId, '');
+      saveLabels(null);
       cfg.token = '';
       st.state = null;
       st.role = null;
       st.info = null;
       $('#settingsDlg').close();
-      toast(`ルーム「${room}」を削除しました`);
+      toast(`ルーム「${name}」を削除しました`);
       openSettings('別のルームに入るか、新しく作成してください');
     } catch (e) {
       toast(e.message, true);
@@ -784,7 +766,6 @@
         b.textContent = input.type === 'password' ? '表示' : '隠す';
       });
     });
-    // ルーム名や合言葉を変えたら「作成」モードを解除
     ['#setRoom', '#setToken'].forEach((sel) => $(sel).addEventListener('input', () => {
       if (!$('#fieldConfirm').hidden) {
         $('#fieldConfirm').hidden = true;
@@ -798,21 +779,168 @@
     $('#btnSaveSettings').addEventListener('click', enterRoom);
     $('#btnChangePass').addEventListener('click', changePass);
     $('#btnDeleteRoom').addEventListener('click', deleteRoom);
+    $('#btnClearLabels').addEventListener('click', () => {
+      if (!confirm('この端末に保存している議題名・発表者名・会議名を消去します。タイマーと持ち時間はそのまま残ります。よろしいですか？')) return;
+      saveLabels(null);
+      renderStatic();
+      toast('この端末の議題名を消去しました');
+    });
+  }
+
+  /* ============================================================
+   *  アジェンダの読み取り（すべてこのブラウザの中で処理）
+   * ============================================================ */
+
+  /**
+   * 文章からアジェンダを読み取る（ルールベース）。
+   *  - 「10:00-10:15」「10時〜10時15分」→ 差分を分に
+   *  - 「15分」「15min」「1時間」「0.5h」→ 分に
+   *  - 開始時刻だけの行が並ぶ場合は、次の行の開始時刻との差を分に
+   *  - 「（佐藤）」「担当：佐藤」「発表：佐藤」→ 発表者
+   *  - 時間の書かれていない番号付きの行 → 5分（推定）として黄色表示
+   */
+  function parseAgendaText(raw) {
+    const text = String(raw || '').normalize('NFKC').replace(/\r/g, '');
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const T = '(\\d{1,2})\\s*[:時]\\s*(\\d{1,2})?\\s*分?';
+    const rangeRe = new RegExp(T + '\\s*(?:-|~|〜|～|ー|―|−|–|—|から)\\s*' + T);
+    const startRe = new RegExp('^(?:\\d+[.)]\\s*)?' + T + '(?=\\s|[^\\d]|$)');
+    const durRe = /(\d+(?:\.\d+)?)\s*(時間|h(?:ours?|rs?)?\b|分|min(?:utes?|s)?\b|m\b)/i;
+    const bulletRe = /^(?:\d{1,2}\s*[.)、．]|[①-⑳]|[・•●○◆◇■□▶►\-*]|第\s*\d+\s*部?)/;
+    const toMin = (h, m) => Number(h) * 60 + Number(m || 0);
+
+    const items = [];
+    let meetingTitle = '';
+    const notes = [];
+
+    lines.forEach((line) => {
+      let rest = line;
+      let minutes = null;
+      let start = null;
+      let estimated = false;
+
+      const r = rest.match(rangeRe);
+      if (r) {
+        const a = toMin(r[1], r[2]);
+        let b = toMin(r[3], r[4]);
+        if (b < a) b += 12 * 60;     // 12時間表記のまたぎ（例 11:50-0:10 は稀なので 12h 補正のみ）
+        minutes = b - a;
+        start = a;
+        rest = rest.replace(r[0], ' ');
+      } else {
+        const sm = rest.match(startRe);
+        if (sm) { start = toMin(sm[1], sm[2]); rest = rest.replace(sm[0], ' '); }
+        const d = rest.match(durRe);
+        if (d) {
+          const n = Number(d[1]);
+          minutes = /時間|^h/i.test(d[2]) ? n * 60 : n;
+          rest = rest.replace(d[0], ' ');
+        }
+      }
+
+      // 発表者
+      let presenter = '';
+      const p1 = rest.match(/[（(]\s*([^（）()]{1,20}?)\s*[）)]\s*$/);
+      const p2 = rest.match(/(?:担当|発表者?|説明|報告者|司会)\s*[:：]?\s*([^\s、,／/]{1,20})/);
+      if (p2) { presenter = p2[1]; rest = rest.replace(p2[0], ' '); } else if (p1) { presenter = p1[1]; rest = rest.replace(p1[0], ' '); }
+      presenter = presenter.replace(/(さん|様|氏)$/, '').trim();
+
+      const isBullet = bulletRe.test(line);
+      let title = rest.replace(bulletRe, ' ')
+        .replace(/[\s　]*[|｜:：\-–—・]+[\s　]*$/, '')
+        .replace(/^[\s　|｜:：\-–—・]+/, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+      if (minutes === null && start === null) {
+        if (isBullet && title) {
+          items.push({ title, minutes: null, presenter, estimated: true, start: null });
+        } else if (!meetingTitle && !items.length && title) {
+          meetingTitle = title.slice(0, 60);
+        }
+        return;
+      }
+      if (!title) title = `議題 ${items.length + 1}`;
+      items.push({ title, minutes, presenter, estimated, start });
+    });
+
+    // 最後の「14:30 終了」のような締めの行（開始時刻だけで次が無い）は議題に含めない
+    const last = items[items.length - 1];
+    if (last && last.minutes === null && last.start !== null && /^(終了|閉会|解散|散会|おわり|end|close)$/i.test(last.title)) items.pop();
+
+    // 開始時刻だけの行：次の行の開始時刻との差
+    items.forEach((it, i) => {
+      if (it.minutes === null && it.start !== null) {
+        const next = items.slice(i + 1).find((x) => x.start !== null);
+        if (next) {
+          let d = next.start - it.start;
+          if (d < 0) d += 12 * 60;
+          it.minutes = d;
+        } else {
+          it.estimated = true;
+        }
+      }
+    });
+    let estimatedCount = 0;
+    items.forEach((it) => {
+      if (it.minutes === null || !(it.minutes > 0)) { it.minutes = 5; it.estimated = true; }
+      if (it.estimated) estimatedCount++;
+      it.minutes = clamp(Math.round(it.minutes * 2) / 2, 0.5, 600);
+      it.title = it.title.slice(0, 50);
+      it.presenter = (it.presenter || '').slice(0, 20);
+      delete it.start;
+    });
+    if (estimatedCount) notes.push(`持ち時間が読み取れなかった ${estimatedCount} 件は 5 分にしています（黄色の枠）。`);
+    return { meetingTitle, agenda: items.slice(0, 50), notes: notes.join(' ') };
+  }
+
+  /* ---------- 画像の文字認識（ブラウザ内で実行） ---------- */
+  let tesseractLoading = null;
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    if (tesseractLoading) return tesseractLoading;
+    tesseractLoading = new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = TESSERACT_URL;
+      sc.onload = () => (window.Tesseract ? resolve(window.Tesseract) : reject(new Error('文字認識の準備に失敗しました')));
+      sc.onerror = () => { tesseractLoading = null; reject(new Error('文字認識プログラムを読み込めません（社内ネットワークで制限されている可能性があります）')); };
+      document.head.appendChild(sc);
+    });
+    return tesseractLoading;
+  }
+
+  async function ocrImages(list, onProgress) {
+    const T = await loadTesseract();
+    const worker = await T.createWorker(['jpn', 'eng'], 1, {
+      logger: (m) => {
+        if (m.status === 'recognizing text') onProgress(`文字を読み取っています ${Math.round((m.progress || 0) * 100)}%`);
+        else if (/load|initializ/i.test(m.status)) onProgress('文字認識の準備をしています（初回は 1 分ほどかかります）');
+      },
+    });
+    try {
+      const texts = [];
+      for (let i = 0; i < list.length; i++) {
+        onProgress(`${i + 1} / ${list.length} 枚目を読み取っています`);
+        const { data } = await worker.recognize(list[i].dataUrl);
+        texts.push(data.text || '');
+      }
+      // 日本語の文字の間に入りがちな空白を詰める
+      return texts.join('\n')
+        .replace(/([^\x00-\x7F])[ \t]+(?=[^\x00-\x7F])/g, '$1')
+        .replace(/[ \t]+\n/g, '\n');
+    } finally {
+      await worker.terminate();
+    }
   }
 
   /* ============================================================
    *  アジェンダの取り込み・編集
    * ============================================================ */
   let draft = { title: '', agenda: [] };
-  const MAX_ROWS = 30;
-
-  /* ---------- 画像からの取り込み ----------
-   * 画像はブラウザで縮小（長辺 2000px・JPEG）してから送る。
-   * 文字が読める解像度を保ちつつ、GAS への送信量を抑えるため。 */
+  const MAX_ROWS = 50;
   const MAX_IMAGES = 3;
-  const IMG_LONG_SIDE = 2000;
-  const IMG_QUALITY = 0.85;
-  let images = [];   // { name, dataUrl, base64, bytes }
+  const IMG_LONG_SIDE = 2400;
+  let images = [];
 
   function switchImportTab(name) {
     $$('#importDlg .tab').forEach((t) => t.classList.toggle('is-active', t.dataset.tab === name));
@@ -824,12 +952,12 @@
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('この画像は読み込めません（HEIC の場合は JPEG か PNG で保存し直してください）')); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('この画像は読み込めません（JPEG か PNG で保存し直してください）')); };
       img.src = url;
     });
   }
 
-  async function shrinkImage(file) {
+  async function prepareImage(file) {
     const img = await loadImage(file);
     const scale = Math.min(1, IMG_LONG_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
     const w = Math.max(1, Math.round(img.naturalWidth * scale));
@@ -838,12 +966,10 @@
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';            // 透過 PNG のスクリーンショット対策（背景を白に）
+    ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
     ctx.drawImage(img, 0, 0, w, h);
-    const dataUrl = canvas.toDataURL('image/jpeg', IMG_QUALITY);
-    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    return { name: file.name || '貼り付けた画像', dataUrl, base64, bytes: Math.round(base64.length * 0.75), w, h };
+    return { dataUrl: canvas.toDataURL('image/png'), w, h };
   }
 
   async function addImageFiles(files) {
@@ -851,11 +977,7 @@
     if (!list.length) { toast('画像ファイルが見つかりませんでした', true); return; }
     for (const f of list) {
       if (images.length >= MAX_IMAGES) { toast(`画像は ${MAX_IMAGES} 枚までです`, true); break; }
-      try {
-        images.push(await shrinkImage(f));
-      } catch (e) {
-        toast(e.message, true);
-      }
+      try { images.push(await prepareImage(f)); } catch (e) { toast(e.message, true); }
     }
     renderThumbs();
   }
@@ -867,16 +989,15 @@
         <button type="button" class="thumb-del" data-del="${i}" aria-label="画像 ${i + 1} を外す">外す</button>
         <small>${i + 1}枚目　${im.w}×${im.h}</small>
       </li>`).join('');
-    const total = images.reduce((a, im) => a + im.bytes, 0);
-    setText('#imgInfo', images.length ? `${images.length} 枚（約 ${Math.max(1, Math.round(total / 1024))} KB）` : '');
+    setText('#imgInfo', images.length ? `${images.length} 枚` : '');
     $('#btnParseImage').disabled = images.length === 0;
   }
 
-  /** 画像を完全に破棄する（保存はどこにもしない。解析後・失敗時・画面を閉じたときに呼ぶ） */
+  /** 画像を完全に破棄する（どこにも保存しない） */
   function clearImages() {
-    images.forEach((im) => { im.dataUrl = ''; im.base64 = ''; });
+    images.forEach((im) => { im.dataUrl = ''; });
     images = [];
-    $$('#imgThumbs img').forEach((img) => { img.removeAttribute('src'); });
+    $$('#imgThumbs img').forEach((img) => img.removeAttribute('src'));
     const input = $('#imgFile');
     if (input) input.value = '';
     renderThumbs();
@@ -889,10 +1010,16 @@
 
   function openImport(useCurrent) {
     const s = st.state;
-    if (useCurrent && s) {
-      draft = { title: s.title || '', agenda: s.agenda.map((it) => ({ ...it })) };
-    } else if (!draft.agenda.length && s && s.agenda.length) {
-      draft = { title: s.title || '', agenda: s.agenda.map((it) => ({ ...it })) };
+    if (s && (useCurrent || !draft.agenda.length)) {
+      const L = labelsFor(s);
+      draft = {
+        title: L.title || '',
+        agenda: s.agenda.map((m, i) => ({
+          title: (L.items && L.items[i] && L.items[i].title) || '',
+          minutes: m,
+          presenter: (L.items && L.items[i] && L.items[i].presenter) || '',
+        })),
+      };
     }
     $('#parseNotes').hidden = true;
     renderDraft();
@@ -903,13 +1030,13 @@
     $('#draftTitle').value = draft.title || '';
     const body = $('#draftBody');
     if (!draft.agenda.length) {
-      body.innerHTML = '<tr><td colspan="5" class="hint" style="text-align:center;padding:16px">まだ議題がありません。資料を解析するか「行を追加」で入力してください。</td></tr>';
+      body.innerHTML = '<tr><td colspan="5" class="hint" style="text-align:center;padding:16px">まだ議題がありません。画像や文章を読み取るか「行を追加」で入力してください。</td></tr>';
     } else {
       body.innerHTML = draft.agenda.map((it, i) => `
         <tr data-i="${i}" class="${it.estimated ? 'est' : ''}">
           <td>${i + 1}</td>
           <td><input type="text" data-k="title" maxlength="50" value="${esc(it.title)}" aria-label="議題 ${i + 1}"></td>
-          <td class="min"><input type="number" data-k="minutes" min="0.5" max="600" step="0.5" value="${esc(it.minutes)}" aria-label="分">${it.estimated ? '<span class="est-tag">推定値</span>' : ''}</td>
+          <td class="min"><input type="number" data-k="minutes" min="0.5" max="600" step="0.5" value="${esc(it.minutes)}" aria-label="分">${it.estimated ? '<span class="est-tag">要確認</span>' : ''}</td>
           <td class="who"><input type="text" data-k="presenter" maxlength="20" value="${esc(it.presenter || '')}" aria-label="発表者"></td>
           <td class="ops">
             <button type="button" class="icon-btn" data-op="up" aria-label="上へ" ${i === 0 ? 'disabled' : ''}>↑</button>
@@ -926,47 +1053,32 @@
     setText('#draftTotal', draft.agenda.length ? `合計 ${fmtMinutes(total)}（${draft.agenda.length} 議題）` : '');
   }
 
-  function setImportLoading(on) {
+  function setImportBusy(on, message = '') {
     $('#importLoading').hidden = !on;
+    setText('#importLoadingText', message);
     $$('#importDlg .btn').forEach((b) => { if (b.value !== 'close') b.disabled = on; });
+    if (!on) renderThumbs();
   }
 
-  async function runParse(action, payload) {
-    setImportLoading(true);
-    try {
-      const r = await api(action, payload);
-      if (!r.agenda.length) {
-        toast('議題を見つけられませんでした。資料の内容を確認してください', true);
-        return;
-      }
-      draft = { title: r.meetingTitle || (r.source && r.source.name) || draft.title, agenda: r.agenda };
-      const notes = [r.notes, r.agenda.some((x) => x.estimated) ? '黄色の枠は Gemini が推定した持ち時間です。確認してください。' : '']
-        .filter(Boolean).join(' ');
-      $('#parseNotes').hidden = !notes;
-      $('#parseNotes').textContent = notes;
-      renderDraft();
-      toast(`${r.agenda.length} 件の議題を読み取りました`);
-    } catch (e) {
-      toast(e.message + (action === 'parseImage' ? '（画像は消去しました。もう一度貼り付けてください）' : ''), true);
-    } finally {
-      setImportLoading(false);
-      // 送信に使った画像データは成否にかかわらず消去する
-      if (action === 'parseImage') {
-        if (payload && Array.isArray(payload.images)) payload.images.forEach((im) => { im.data = ''; });
-        clearImages();
-      }
+  function applyParsed(r) {
+    if (!r.agenda.length) {
+      toast('議題を読み取れませんでした。文章を直すか、手で入力してください', true);
+      return false;
     }
+    draft = { title: r.meetingTitle || draft.title, agenda: r.agenda };
+    $('#parseNotes').hidden = !r.notes;
+    $('#parseNotes').textContent = r.notes;
+    renderDraft();
+    toast(`${r.agenda.length} 件の議題を読み取りました。内容を確認してください`);
+    return true;
   }
 
   function bindImport() {
     $('#btnImport').addEventListener('click', () => openImport(false));
     $('#btnEditAgenda').addEventListener('click', () => openImport(true));
+    $$('#importDlg .tab').forEach((tab) => tab.addEventListener('click', () => switchImportTab(tab.dataset.tab)));
 
-    $$('#importDlg .tab').forEach((tab) => {
-      tab.addEventListener('click', () => switchImportTab(tab.dataset.tab));
-    });
-
-    // ---- 画像：選択・ドロップ・貼り付け ----
+    // 画像
     const drop = $('#imgDrop');
     $('#btnPickImage').addEventListener('click', (e) => { e.stopPropagation(); $('#imgFile').click(); });
     drop.addEventListener('click', () => $('#imgFile').click());
@@ -981,61 +1093,47 @@
       images.splice(Number(b.dataset.del), 1);
       renderThumbs();
     });
-    // 取り込み画面を閉じたら、解析前の画像も消去
     $('#importDlg').addEventListener('close', clearImages);
 
-    $('#btnParseImage').addEventListener('click', () => {
+    $('#btnParseImage').addEventListener('click', async () => {
       if (!images.length) return;
-      runParse('parseImage', { images: images.map((im) => ({ mimeType: 'image/jpeg', data: im.base64 })) });
+      setImportBusy(true, '文字認識の準備をしています');
+      try {
+        const text = await ocrImages(images, (msg) => setText('#importLoadingText', msg));
+        $('#pasteText').value = text.trim();
+        const ok = applyParsed(parseAgendaText(text));
+        if (!ok) switchImportTab('text');
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        clearImages();            // 成否にかかわらず画像は消去
+        setImportBusy(false);
+      }
     });
 
-    // どこで Ctrl+V しても画像なら取り込む（操作画面で進行役のときだけ）
+    // テキスト
+    $('#btnParseText').addEventListener('click', () => {
+      const text = $('#pasteText').value.trim();
+      if (!text) { toast('読み取る文章を貼り付けてください', true); return; }
+      applyParsed(parseAgendaText(text));
+    });
+    $('#btnClearText').addEventListener('click', () => { $('#pasteText').value = ''; });
+
+    // どこで Ctrl+V しても画像なら取り込む
     document.addEventListener('paste', (e) => {
-      if (st.role !== 'admin' || MODE !== 'control' || document.body.classList.contains('auth-open')) return;
+      if (st.role !== 'admin' || MODE !== 'control') return;
       const files = clipboardImages(e);
       if (!files.length) return;
       const dlg = $('#importDlg');
-      const otherDialog = Array.from(document.querySelectorAll('dialog[open]')).some((d) => d !== dlg);
-      if (otherDialog) return;
+      if (Array.from(document.querySelectorAll('dialog[open]')).some((d) => d !== dlg)) return;
       e.preventDefault();
       if (!dlg.open) openImport(false);
       switchImportTab('image');
       addImageFiles(files);
     });
 
-    $('#btnParseDrive').addEventListener('click', () => {
-      const ref = $('#driveRef').value.trim();
-      if (!ref) { toast('ファイルの URL か ID を入れてください', true); return; }
-      runParse('parseFile', { file: ref });
-    });
-
-    $('#btnParseText').addEventListener('click', () => {
-      const text = $('#pasteText').value.trim();
-      if (!text) { toast('解析するテキストを貼り付けてください', true); return; }
-      runParse('parseText', { text });
-    });
-
-    $('#btnListFiles').addEventListener('click', async () => {
-      const ul = $('#fileList');
-      ul.innerHTML = '<li class="hint">読み込んでいます…</li>';
-      try {
-        const r = await api('listFiles');
-        ul.innerHTML = r.files.length
-          ? r.files.map((f) => `<li><button type="button" data-id="${esc(f.id)}"><span>${esc(f.name)}</span><small>${esc(new Date(f.updated).toLocaleDateString('ja-JP'))}</small></button></li>`).join('')
-          : '<li class="hint">対応形式のファイルがありません</li>';
-      } catch (e) {
-        ul.innerHTML = `<li class="hint">${esc(e.message)}</li>`;
-      }
-    });
-    $('#fileList').addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-id]');
-      if (!b) return;
-      $('#driveRef').value = b.dataset.id;
-      runParse('parseFile', { file: b.dataset.id });
-    });
-
+    // 下書きの編集
     $('#draftTitle').addEventListener('input', (e) => { draft.title = e.target.value; });
-
     $('#draftBody').addEventListener('input', (e) => {
       const tr = e.target.closest('tr[data-i]');
       if (!tr) return;
@@ -1045,7 +1143,6 @@
       if (k === 'minutes') { it.estimated = false; tr.classList.remove('est'); }
       updateDraftTotal();
     });
-
     $('#draftBody').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-op]');
       if (!b) return;
@@ -1056,7 +1153,6 @@
       if (b.dataset.op === 'down' && i < a.length - 1) [a[i + 1], a[i]] = [a[i], a[i + 1]];
       renderDraft();
     });
-
     $('#btnAddRow').addEventListener('click', () => {
       if (draft.agenda.length >= MAX_ROWS) { toast(`議題は ${MAX_ROWS} 件までです`, true); return; }
       draft.agenda.push({ title: '', minutes: 10, presenter: '' });
@@ -1066,13 +1162,17 @@
 
     $('#btnApplyAgenda').addEventListener('click', async () => {
       const agenda = draft.agenda
-        .map((it) => ({ title: String(it.title || '').trim(), minutes: Number(it.minutes), presenter: String(it.presenter || '').trim() }))
-        .filter((it) => it.title && it.minutes > 0);
-      if (!agenda.length) { toast('議題名と 0 より大きい分を入れた行が 1 つ以上必要です', true); return; }
+        .map((it) => ({ title: String(it.title || '').trim(), minutes: Math.round(Number(it.minutes) * 2) / 2, presenter: String(it.presenter || '').trim() }))
+        .filter((it) => it.minutes > 0);
+      if (!agenda.length) { toast('0 より大きい分を入れた行が 1 つ以上必要です', true); return; }
       if (st.state?.status === 'running' && !confirm('進行中のタイマーを止めて、新しいアジェンダの 1 番目から始めます。よろしいですか？')) return;
+      // 議題名はこの端末へ、持ち時間（数字）だけをサーバーへ
+      const L = loadLabels() || {};
+      saveLabels({ title: draft.title.trim(), freeTitle: L.freeTitle || '', items: agenda });
       try {
-        await api('setAgenda', { title: draft.title.trim(), agenda });
+        await api('setAgenda', { minutes: agenda.map((it) => it.minutes) });
         $('#importDlg').close();
+        $('#pasteText').value = '';
         toast('アジェンダを反映しました。「開始」で計測を始めます');
       } catch (e) {
         toast(e.message, true);
@@ -1082,14 +1182,14 @@
 
   /* ============================================================
    *  オーバーレイ・共有 URL
+   *  ルーム ID と閲覧キーは「#」の後ろへ（# 以降はどのサーバーにも送られない）
    * ============================================================ */
   function buildUrl(mode, extra = {}) {
-    const p = new URLSearchParams({ mode, room: cfg.room });
-    // config.js で URL を固定している場合は、共有 URL に api を含めない
-    if (!API_FIXED) p.set('api', cfg.api);
-    p.set('token', (st.info && st.info.viewerToken) || '');
-    Object.entries(extra).forEach(([k, v]) => { if (v !== null && v !== undefined && v !== '') p.set(k, v); });
-    return location.origin + location.pathname + '?' + p.toString();
+    const q = new URLSearchParams({ mode });
+    Object.entries(extra).forEach(([k, v]) => { if (v !== null && v !== undefined && v !== '') q.set(k, v); });
+    const h = new URLSearchParams({ r: cfg.roomId, k: (st.info && st.info.viewerToken) || '' });
+    if (!API_FIXED) h.set('api', cfg.api);
+    return location.origin + location.pathname + '?' + q.toString() + '#' + h.toString();
   }
 
   function updateShareUrls() {
@@ -1097,12 +1197,12 @@
       bg: $('#ovBg').value,
       pos: $('#ovPos').value,
       size: $('#ovSize').value,
-      title: $('#ovShowTitle').checked ? '' : '0',
       bar: $('#ovShowBar').checked ? '' : '0',
       hideIdle: $('#ovHideIdle').checked ? '1' : '',
     });
     $('#ovUrl').value = ov;
     $('#viewUrl').value = buildUrl('view');
+    setText('#roomIdText', cfg.roomId);
     const frame = $('#ovPreview');
     if (frame.src !== ov) frame.src = ov;
   }
@@ -1114,9 +1214,9 @@
       updateShareUrls();
       $('#shareDlg').showModal();
     });
-    ['#ovBg', '#ovPos', '#ovSize', '#ovShowTitle', '#ovShowBar', '#ovHideIdle'].forEach((sel) => $(sel).addEventListener('change', updateShareUrls));
+    ['#ovBg', '#ovPos', '#ovSize', '#ovShowBar', '#ovHideIdle'].forEach((sel) => $(sel).addEventListener('change', updateShareUrls));
     $('#btnRotateViewer').addEventListener('click', async () => {
-      if (!confirm('閲覧キーを作り直すと、配布済みのオーバーレイ URL と閲覧用 URL は使えなくなります。OBS の URL も貼り直しが必要です。続けますか？')) return;
+      if (!confirm('閲覧キーを作り直すと、配布済みのオーバーレイ URL と閲覧用 URL は使えなくなります。続けますか？')) return;
       try {
         const r = await api('rotateViewerKey');
         st.info = Object.assign({}, st.info, { viewerToken: r.viewerKey });
@@ -1149,13 +1249,13 @@
     el.classList.toggle('error', !!isError);
     el.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), isError ? 6000 : 3000);
+    toastTimer = setTimeout(() => el.classList.remove('show'), isError ? 6000 : 3500);
   }
 
   /* ============================================================
    *  起動
    * ============================================================ */
-  function init() {
+  async function init() {
     document.body.classList.add('mode-' + MODE);
     document.documentElement.classList.add('mode-' + MODE);
 
@@ -1166,31 +1266,52 @@
         'pos-' + pick('pos', ['br', 'bl', 'tr', 'tl', 'bc', 'tc'], 'br'),
         'size-' + pick('size', ['s', 'm', 'l', 'xl'], 'm'),
       );
-      if (qs.get('title') === '0') document.body.classList.add('no-title');
       if (qs.get('bar') === '0') document.body.classList.add('no-bar');
       if (qs.get('hideIdle') === '1') document.body.classList.add('hide-idle');
-      if (!cfg.api || !cfg.token) setText('#ovTitle', cfg.api ? '共有ダイアログのオーバーレイ URL を使ってください' : 'config.js の apiUrl を設定してください');
-    } else {
+    }
+
+    if (MODE === 'control') {
       bindControls();
       bindSettings();
       bindImport();
       bindShare();
       renderSoundButton();
-      setText('#roomName', cfg.room);
-    }
-    setInterval(render, 200);
-
-    if (MODE === 'control') {
-      if (!cfg.api) { openSettings('config.js の apiUrl を設定してください'); return; }
-      // 操作画面は進行役のログインが必要。ログインが済んでから同期を始める
-      window.TimerAuth.init(api, () => {
-        if (!cfg.token) openSettings('ルーム名と合言葉を入力してください');
-        pollLoop();
-      });
+      const name = loadSaved().room || APP_CONFIG.defaultRoom || '';
+      if (name && ROOM_RE.test(name)) {
+        cfg.roomName = name;
+        cfg.roomId = await roomIdOf(name);
+        cfg.token = getStoredToken(cfg.roomId);
+      }
+      setText('#roomName', cfg.roomName || '未設定');
+      if (!cfg.api) openSettings('config.js の apiUrl を設定してください');
+      else if (!cfg.token) openSettings('ルーム名と合言葉を入力してください');
     } else {
-      pollLoop();
+      // 閲覧・オーバーレイ：URL の # の後ろからルーム ID と閲覧キーを読む
+      const r = String(hs.get('r') || '').toLowerCase();
+      if (ROOM_ID_RE.test(r)) {
+        cfg.roomId = r;
+        cfg.token = String(hs.get('k') || '');
+      } else if (MODE === 'view') {
+        const name = loadSaved().room || '';
+        if (ROOM_RE.test(name)) {
+          cfg.roomName = name;
+          cfg.roomId = await roomIdOf(name);
+          cfg.token = getStoredToken(cfg.roomId);
+        }
+      }
+      if (MODE === 'view') bindControls();
+      if (!cfg.roomId || !cfg.token) {
+        setText('#ovTitle', '共有ダイアログの URL を使ってください');
+        setText('#itemTitle', '共有ダイアログの閲覧用 URL を使ってください');
+      }
     }
+
+    pollLoop();
+    setInterval(render, 200);
   }
+
+  // 動作確認用（ブラウザ内の読み取り関数）
+  window.TimerParse = { parseAgendaText };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

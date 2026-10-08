@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>会議タイマー</title>
   <!-- 更新時は ?v= の値を変えると、ブラウザの古いキャッシュを使わずに読み込まれる -->
-  <link rel="stylesheet" href="style.css?v=20261008e">
+  <link rel="stylesheet" href="style.css?v=20261009a">
 </head>
 <body data-level="idle" data-status="idle">
 
@@ -28,11 +28,6 @@
         <button class="btn ghost admin-only" id="btnShare" type="button">オーバーレイ・共有URL</button>
         <button class="btn ghost" id="btnFullscreen" type="button" title="全画面表示">全画面</button>
         <button class="btn ghost" id="btnSettings" type="button">ルームと合言葉</button>
-        <div class="user-box login-only">
-          <span class="user-name" id="userName"></span>
-          <button class="btn ghost small" id="btnChangePw" type="button">パスワード変更</button>
-          <button class="btn ghost small" id="btnLogout" type="button">ログアウト</button>
-        </div>
       </div>
     </header>
 
@@ -106,7 +101,7 @@
           <h2>アジェンダ</h2>
           <div class="panel-actions admin-only">
             <button class="btn small ghost" type="button" id="btnEditAgenda">編集</button>
-            <button class="btn small primary" type="button" id="btnImport">資料から取り込む</button>
+            <button class="btn small primary" type="button" id="btnImport">アジェンダを取り込む</button>
           </div>
         </div>
         <ol id="agendaList" class="agenda-list"></ol>
@@ -131,15 +126,16 @@
       <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
     </form>
 
+    <p class="privacy-note">画像・文章の読み取りは<b>この PC のブラウザの中だけ</b>で行い、外部には送信しません。議題名・発表者名もこの PC にだけ保存し、サーバーには<b>持ち時間（分）の数字だけ</b>を送ります。</p>
+
     <div class="tabs" role="tablist">
-      <button type="button" class="tab is-active" data-tab="image" role="tab">画像を貼り付け</button>
-      <button type="button" class="tab" data-tab="drive" role="tab">Google ドライブの資料</button>
-      <button type="button" class="tab" data-tab="text" role="tab">テキストを貼り付け</button>
+      <button type="button" class="tab is-active" data-tab="image" role="tab">画像から読み取る</button>
+      <button type="button" class="tab" data-tab="text" role="tab">文章から読み取る</button>
       <button type="button" class="tab" data-tab="manual" role="tab">手で入力</button>
     </div>
 
     <div class="tab-pane is-active" data-pane="image">
-      <p class="hint">アジェンダのスクリーンショットや写真を、ここに貼り付け（Ctrl+V）、ドラッグ＆ドロップ、または「画像を選ぶ」で追加してください。3枚まで。<br>画像は読み取りにだけ使い、<b>どこにも保存しません</b>。解析が終わったとき、またはこの画面を閉じたときに消去されます。</p>
+      <p class="hint">アジェンダのスクリーンショットや写真を、Ctrl+V で貼り付けるか、ドラッグ＆ドロップ、または「画像を選ぶ」で追加してください（3枚まで）。画像は読み取りが終わるか、この画面を閉じると消去されます。</p>
       <div class="dropzone" id="imgDrop" tabindex="0" role="button" aria-label="画像を貼り付けまたはドロップ">
         <div class="dropzone-main">
           <strong>ここに画像を貼り付け</strong>
@@ -151,35 +147,29 @@
       <ul class="thumbs" id="imgThumbs"></ul>
       <div class="row between">
         <span class="hint" id="imgInfo"></span>
-        <button class="btn primary" type="button" id="btnParseImage" disabled>Gemini で解析</button>
+        <button class="btn primary" type="button" id="btnParseImage" disabled>読み取る</button>
       </div>
-    </div>
-
-    <div class="tab-pane" data-pane="drive">
-      <p class="hint">Google ドキュメント、スライド、スプレッドシート、PDF、テキストを読み込めます。共有 URL かファイル ID を入れてください。</p>
-      <div class="row">
-        <input id="driveRef" class="grow" type="text" placeholder="https://docs.google.com/presentation/d/…">
-        <button class="btn primary" type="button" id="btnParseDrive">Gemini で解析</button>
-      </div>
-      <button class="btn ghost small" type="button" id="btnListFiles">会議資料フォルダから選ぶ</button>
-      <ul id="fileList" class="file-list"></ul>
+      <p class="hint">初回だけ文字認識プログラム（約 10MB）をダウンロードします。読み取った文字は「文章から読み取る」に入るので、誤りがあれば直して読み取り直せます。</p>
     </div>
 
     <div class="tab-pane" data-pane="text">
-      <p class="hint">招集メールやアジェンダの文章をそのまま貼り付けてください。</p>
-      <textarea id="pasteText" rows="7" placeholder="例）10:00-10:05 開会&#10;10:05-10:25 売上報告（佐藤）&#10;新製品の検討 25分"></textarea>
-      <div class="row end"><button class="btn primary" type="button" id="btnParseText">Gemini で解析</button></div>
+      <p class="hint">招集メールなどのアジェンダ部分を貼り付けてください。「10:00-10:15」「15分」「（佐藤）」のような書き方を読み取ります。</p>
+      <textarea id="pasteText" rows="8" placeholder="例）&#10;10:00-10:05 開会&#10;10:05-10:25 売上報告（佐藤）&#10;・新製品の検討 25分 担当：鈴木&#10;・質疑応答 10分"></textarea>
+      <div class="row between">
+        <button class="btn ghost small" type="button" id="btnClearText">文章を消す</button>
+        <button class="btn primary" type="button" id="btnParseText">読み取る</button>
+      </div>
     </div>
 
     <div class="tab-pane" data-pane="manual">
       <p class="hint">下の表に議題と持ち時間を直接入力できます。</p>
     </div>
 
-    <div class="loading" id="importLoading" hidden><span class="spinner"></span><span>Gemini が資料を読んでいます（10〜30秒）</span></div>
+    <div class="loading" id="importLoading" hidden><span class="spinner"></span><span id="importLoadingText">読み取っています</span></div>
 
     <div class="draft">
       <div class="row">
-        <label class="field grow">会議名<input id="draftTitle" type="text" maxlength="60" placeholder="例：営業部 週次定例"></label>
+        <label class="field grow">会議名（この PC にだけ保存）<input id="draftTitle" type="text" maxlength="60" placeholder="例：週次定例"></label>
         <div class="draft-total" id="draftTotal"></div>
       </div>
       <p class="notes" id="parseNotes" hidden></p>
@@ -202,7 +192,7 @@
       <h2>ルームに入る</h2>
       <button class="btn ghost small" value="close" aria-label="閉じる">閉じる</button>
     </form>
-    <p class="hint">進行役が決めたルーム名と合言葉で入ります。まだ無いルーム名を入れると、その合言葉で新しいルームを作ります。</p>
+    <p class="hint">進行役が決めたルーム名と合言葉で入ります。まだ無いルーム名を入れると、その合言葉で新しいルームを作ります。ルーム名と合言葉は暗号化（ハッシュ化）してから送るため、名前そのものはサーバーに届きません。</p>
 
     <label class="field" id="fieldApi">API の URL（GAS ウェブアプリ。config.js で設定していない場合のみ）<input id="setApi" type="url" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="field">ルーム名（半角英数字と - _、40文字まで）<input id="setRoom" type="text" maxlength="40" placeholder="例：sales-weekly" autocomplete="off"></label>
@@ -227,6 +217,14 @@
       <div class="row between">
         <span class="hint" id="passResult"></span>
         <button class="btn" type="button" id="btnChangePass">合言葉を変更</button>
+      </div>
+    </div>
+
+    <div class="admin-only dlg-section">
+      <h3>この PC の議題名を消す</h3>
+      <div class="row between">
+        <p class="hint">議題名・発表者名・会議名はこの PC にだけ保存しています。共用 PC を使ったあとなどに消去できます。</p>
+        <button class="btn ghost" type="button" id="btnClearLabels">議題名を消去</button>
       </div>
     </div>
 
@@ -273,7 +271,6 @@
             <option value="xl">特大</option>
           </select>
         </label>
-        <label class="check"><input type="checkbox" id="ovShowTitle" checked> 議題名を表示</label>
         <label class="check"><input type="checkbox" id="ovShowBar" checked> 残り時間バーを表示</label>
         <label class="check"><input type="checkbox" id="ovHideIdle"> 待機中は隠す</label>
       </div>
@@ -289,86 +286,15 @@
       <span class="row"><input id="viewUrl" class="grow" type="text" readonly><button class="btn small" type="button" data-copy="viewUrl">コピー</button></span>
     </label>
     <div class="row between">
-      <p class="hint">どちらも閲覧キー入りです。社外に共有しないでください。</p>
+      <p class="hint">どちらも閲覧キー入りです。社外に共有しないでください。議題名は表示されず「議題 2 / 5」と表示されます（この PC で開いた場合を除く）。<br>ルーム ID：<code id="roomIdText"></code>（ルーム別の Teams 通知先を設定するときに使います）</p>
       <button class="btn ghost small" type="button" id="btnRotateViewer">閲覧キーを作り直す</button>
     </div>
   </dialog>
 
 
-  <!-- ===================== 会員認証（進行役） ===================== -->
-  <div id="authScreen" class="auth-screen" hidden>
-    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
-      <h1 class="auth-title" id="authTitle">会議タイマー</h1>
-      <p class="hint">進行役の方はログインしてください。発表者・参加者は閲覧用 URL を開くだけで使えます（ログイン不要）。</p>
-
-      <div class="tabs auth-tabs" role="tablist">
-        <button type="button" class="tab is-active" data-auth-tab="login" role="tab">ログイン</button>
-        <button type="button" class="tab" data-auth-tab="register" role="tab">新規登録</button>
-        <button type="button" class="tab" data-auth-tab="forgot" role="tab">パスワードを忘れた</button>
-      </div>
-
-      <form id="loginForm" class="auth-pane is-active" data-auth-pane="login" novalidate>
-        <label class="field">メールアドレス<input id="loginEmail" type="email" autocomplete="username" inputmode="email" required></label>
-        <label class="field">パスワード（初回はメールの仮パスワード）
-          <span class="pw-wrap"><input id="loginPassword" type="password" autocomplete="current-password" required><button type="button" class="pw-eye" data-auth-reveal="loginPassword" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
-        </label>
-        <p class="auth-msg" id="authMsg-login" role="alert"></p>
-        <button class="btn primary block" type="submit">ログイン</button>
-        <p class="auth-links"><a href="#" data-goto-tab="forgot">パスワードを忘れた方</a><a href="#" data-goto-tab="register">はじめての方は新規登録</a></p>
-      </form>
-
-      <form id="registerForm" class="auth-pane" data-auth-pane="register" novalidate>
-        <label class="field">ニックネーム（20文字まで。画面に表示されます）<input id="regNickname" type="text" maxlength="20" autocomplete="nickname" required></label>
-        <label class="field">メールアドレス<input id="regEmail" type="email" autocomplete="email" inputmode="email" required></label>
-        <p class="hint">登録すると、このメールアドレスに<b>仮パスワード</b>が届きます（24時間有効）。仮パスワードでログインしたら、ご自身のパスワードに変更してください。</p>
-        <p class="auth-msg" id="authMsg-register" role="alert"></p>
-        <button class="btn primary block" type="submit">登録して仮パスワードを受け取る</button>
-      </form>
-
-      <form id="forgotForm" class="auth-pane" data-auth-pane="forgot" novalidate>
-        <label class="field">登録したメールアドレス<input id="forgotEmail" type="email" autocomplete="email" inputmode="email" required></label>
-        <p class="hint">新しい仮パスワードをメールで送ります。仮パスワードでログインすると、パスワードの変更画面が開きます。届かない場合は迷惑メールフォルダも確認してください。</p>
-        <p class="auth-msg" id="authMsg-forgot" role="alert"></p>
-        <button class="btn primary block" type="submit">仮パスワードを再発行</button>
-      </form>
-    </div>
-  </div>
-
-  <!-- ===================== パスワード変更 ===================== -->
-  <dialog id="pwDlg" class="dlg">
-    <div class="dlg-head">
-      <h2>パスワードの変更</h2>
-      <button class="btn ghost small" type="button" id="pwDlgClose" aria-label="閉じる">閉じる</button>
-    </div>
-    <p class="notes" id="pwForcedNote" hidden>仮パスワードでログインしています。続けるには、ご自身のパスワードを設定してください。</p>
-    <form id="pwForm" novalidate>
-      <label class="field" id="pwCurrentField">現在のパスワード
-        <span class="pw-wrap"><input id="pwCurrent" type="password" autocomplete="current-password"><button type="button" class="pw-eye" data-auth-reveal="pwCurrent" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
-      </label>
-      <label class="field">新しいパスワード
-        <span class="pw-wrap"><input id="pwNew" type="password" maxlength="64" autocomplete="new-password"><button type="button" class="pw-eye" data-auth-reveal="pwNew" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
-      </label>
-
-      <div class="pw-meter" id="pwMeter" data-level="none" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-      <div class="pw-meter-label" id="pwMeterLabel" aria-live="polite">強さ：—</div>
-      <ul class="pw-checks" id="pwChecks"></ul>
-
-      <label class="field">新しいパスワード（確認）
-        <span class="pw-wrap"><input id="pwConfirm" type="password" maxlength="64" autocomplete="new-password"><button type="button" class="pw-eye" data-auth-reveal="pwConfirm" aria-label="パスワードを表示" aria-pressed="false">表示</button></span>
-      </label>
-      <p class="pw-match" id="pwMatch" aria-live="polite"></p>
-      <p class="auth-msg" id="pwMsg" role="alert"></p>
-      <div class="row between">
-        <button class="btn ghost small" type="button" id="authBtnForcedLogout">ログアウト</button>
-        <button class="btn primary" type="submit" id="pwSubmit" disabled>パスワードを変更</button>
-      </div>
-    </form>
-  </dialog>
-
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="config.js?v=20261008e"></script>
-  <script src="auth.js?v=20261008e"></script>
-  <script src="app.js?v=20261008e"></script>
+  <script src="config.js?v=20261009a"></script>
+  <script src="app.js?v=20261009a"></script>
 </body>
 </html>
